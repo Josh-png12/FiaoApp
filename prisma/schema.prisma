@@ -1,0 +1,300 @@
+// =====================================================================
+// FiaoApp — schema.prisma
+// Multi-tenant por storeId (una DB, filtro por aplicación).
+// Dinero: Decimal(12,2) en COP. Nunca Float.
+// Movimientos (ventas, fiados, abonos) son APPEND-ONLY:
+//   no se editan ni borran; se anulan con voidedAt + movimiento inverso.
+// Sync offline: clientId (UUID generado en el dispositivo) es UNIQUE
+//   → el endpoint /api/sync hace upsert por clientId (idempotente).
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------
+// TENANCY Y USUARIOS
+// ---------------------------------------------------------------------
+
+model Store {
+  id        String   @id @default(cuid())
+  name      String
+  ownerName String?
+  phone     String   @unique // teléfono principal de la tienda
+  address   String?
+  city      String   @default("Riohacha")
+  plan      Plan     @default(FREE)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users         User[]
+  customers     Customer[]
+  products      Product[]
+  categories    Category[]
+  sales         Sale[]
+  payments      Payment[]
+  stockEntries  StockEntry[]
+  cashClosings  CashClosing[]
+  suppliers     Supplier[]
+  supplierDebts SupplierDebt[]
+}
+
+enum Plan {
+  FREE
+  TIENDA
+  NEGOCIO
+}
+
+model User {
+  id           String   @id @default(cuid())
+  storeId      String
+  store        Store    @relation(fields: [storeId], references: [id])
+  name         String
+  phone        String   @unique // login: teléfono + PIN
+  pinHash      String   // bcrypt del PIN de 4-6 dígitos
+  role         Role     @default(OWNER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sales        Sale[]
+  payments     Payment[]
+  cashClosings CashClosing[]
+
+  @@index([storeId])
+}
+
+enum Role {
+  OWNER    // ve todo, edita precios, ve ganancias
+  EMPLOYEE // solo registra ventas/fiados/abonos
+}
+
+// ---------------------------------------------------------------------
+// CLIENTES Y FIADO
+// ---------------------------------------------------------------------
+
+model Customer {
+  id          String    @id @default(cuid())
+  clientId    String?   @unique // UUID del dispositivo (sync)
+  storeId     String
+  store       Store     @relation(fields: [storeId], references: [id])
+  name        String
+  phone       String?   // para recordatorio por WhatsApp
+  photoUrl    String?
+  note        String?
+  creditLimit Decimal?  @db.Decimal(12, 2) // límite sugerido (Fase 3)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  sales    Sale[]    // ventas fiadas asociadas
+  payments Payment[] // abonos
+
+  // saldo = SUM(ventas CREDIT no anuladas) - SUM(abonos no anulados)
+  // Derivado, nunca fuente de verdad. Se puede cachear con un campo
+  // balanceCache si el rendimiento lo pide, recalculable siempre.
+
+  @@index([storeId, isActive])
+  @@index([storeId, name])
+}
+
+// Abono a la deuda del cliente (contra el saldo, no contra una venta puntual,
+// igual que en el cuaderno real).
+model Payment {
+  id         String    @id @default(cuid())
+  clientId   String?   @unique // UUID del dispositivo (sync)
+  storeId    String
+  store      Store     @relation(fields: [storeId], references: [id])
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id])
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id])
+  amount     Decimal   @db.Decimal(12, 2)
+  method     PayMethod @default(CASH)
+  note       String?
+  paidAt     DateTime  @default(now()) // fecha real (puede venir del cliente offline)
+  voidedAt   DateTime? // anulación append-only
+  createdAt  DateTime  @default(now())
+
+  @@index([storeId, customerId])
+  @@index([storeId, paidAt])
+}
+
+enum PayMethod {
+  CASH
+  NEQUI
+  DAVIPLATA
+  TRANSFER
+  OTHER
+}
+
+// ---------------------------------------------------------------------
+// PRODUCTOS E INVENTARIO (Fase 2)
+// ---------------------------------------------------------------------
+
+model Category {
+  id              String    @id @default(cuid())
+  storeId         String
+  store           Store     @relation(fields: [storeId], references: [id])
+  name            String    // "Abarrotes", "Bebidas", "Aseo"...
+  defaultMarginPct Decimal? @db.Decimal(5, 2) // fallback cuando no se conoce el costo
+  products        Product[]
+
+  @@unique([storeId, name])
+}
+
+model Product {
+  id         String    @id @default(cuid())
+  clientId   String?   @unique
+  storeId    String
+  store      Store     @relation(fields: [storeId], references: [id])
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id])
+  name       String
+  photoUrl   String?
+  salePrice  Decimal   @db.Decimal(12, 2)
+  unitCost   Decimal?  @db.Decimal(12, 2) // costo actual (última entrada); null = usar margen de categoría
+  stock      Decimal   @default(0) @db.Decimal(12, 3) // Decimal: permite vender por libras/fracciones
+  minStock   Decimal?  @db.Decimal(12, 3) // alerta de reposición manual
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  saleItems    SaleItem[]
+  stockEntries StockEntry[]
+
+  @@index([storeId, isActive])
+  @@index([storeId, name])
+}
+
+// Entrada de mercancía por lote: costo total + cantidad → costo unitario.
+model StockEntry {
+  id         String    @id @default(cuid())
+  clientId   String?   @unique
+  storeId    String
+  store      Store     @relation(fields: [storeId], references: [id])
+  productId  String
+  product    Product   @relation(fields: [productId], references: [id])
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id])
+  quantity   Decimal   @db.Decimal(12, 3)
+  totalCost  Decimal   @db.Decimal(12, 2)
+  unitCost   Decimal   @db.Decimal(12, 4) // totalCost / quantity, calculado al crear
+  enteredAt  DateTime  @default(now())
+  voidedAt   DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([storeId, productId])
+}
+
+// ---------------------------------------------------------------------
+// VENTAS
+// ---------------------------------------------------------------------
+
+model Sale {
+  id          String      @id @default(cuid())
+  clientId    String?     @unique // UUID del dispositivo (sync idempotente)
+  storeId     String
+  store       Store       @relation(fields: [storeId], references: [id])
+  userId      String?
+  user        User?       @relation(fields: [userId], references: [id])
+  customerId  String?     // obligatorio si paymentType = CREDIT
+  customer    Customer?   @relation(fields: [customerId], references: [id])
+  paymentType PaymentType
+  // total y costo se guardan desnormalizados para reportes rápidos,
+  // pero siempre reconstruibles desde items (o venta libre sin items).
+  total       Decimal     @db.Decimal(12, 2)
+  totalCost   Decimal?    @db.Decimal(12, 2) // null en venta libre sin producto (MVP)
+  note        String?
+  soldAt      DateTime    @default(now()) // timestamp real, puede venir de offline
+  voidedAt    DateTime?
+  createdAt   DateTime    @default(now())
+
+  items SaleItem[]
+
+  @@index([storeId, soldAt])
+  @@index([storeId, customerId])
+  @@index([storeId, paymentType, soldAt])
+}
+
+enum PaymentType {
+  CASH   // efectivo
+  CREDIT // fiado
+  NEQUI
+  DAVIPLATA
+}
+
+model SaleItem {
+  id        String  @id @default(cuid())
+  saleId    String
+  sale      Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Decimal @db.Decimal(12, 3)
+  unitPrice Decimal @db.Decimal(12, 2) // precio CONGELADO al vender
+  unitCost  Decimal? @db.Decimal(12, 4) // costo CONGELADO al vender (clave para ganancia histórica)
+
+  @@index([productId])
+}
+
+// ---------------------------------------------------------------------
+// CIERRE DE CAJA (Fase 2)
+// ---------------------------------------------------------------------
+
+model CashClosing {
+  id           String   @id @default(cuid())
+  clientId     String?  @unique
+  storeId      String
+  store        Store    @relation(fields: [storeId], references: [id])
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id])
+  date         DateTime @db.Date
+  expectedCash Decimal  @db.Decimal(12, 2) // calculado: ventas CASH + abonos CASH del día
+  countedCash  Decimal  @db.Decimal(12, 2) // lo que el tendero contó
+  difference   Decimal  @db.Decimal(12, 2) // counted - expected
+  note         String?
+  createdAt    DateTime @default(now())
+
+  @@unique([storeId, date, userId]) // un cierre por usuario por día
+  @@index([storeId, date])
+}
+
+// ---------------------------------------------------------------------
+// PROVEEDORES Y CUENTAS POR PAGAR (Fase 3)
+// ---------------------------------------------------------------------
+
+model Supplier {
+  id        String   @id @default(cuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id])
+  name      String
+  phone     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  stockEntries StockEntry[]
+  debts        SupplierDebt[]
+
+  @@index([storeId])
+}
+
+model SupplierDebt {
+  id         String    @id @default(cuid())
+  storeId    String
+  store      Store     @relation(fields: [storeId], references: [id])
+  supplierId String
+  supplier   Supplier  @relation(fields: [supplierId], references: [id])
+  amount     Decimal   @db.Decimal(12, 2)
+  dueDate    DateTime? @db.Date
+  paidAt     DateTime?
+  note       String?
+  createdAt  DateTime  @default(now())
+
+  @@index([storeId, dueDate])
+}

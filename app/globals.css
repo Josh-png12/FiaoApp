@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@theme {
+  /* Paleta cálida y de alto contraste — se usa de pie, al sol, con una mano */
+  --color-brand: #16a34a; /* verde: plata que entra */
+  --color-brand-dark: #15803d;
+  --color-debt: #dc2626; /* rojo: me deben */
+  --color-ink: #1c1917;
+  --color-paper: #fafaf9;
+}
+
+html {
+  font-size: 17px; /* tipografía grande por defecto */
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Botón grande táctil: mínimo 48px de alto (regla de UX no negociable) */
+@utility btn {
+  display: flex;
+  min-height: 3.5rem;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  border-radius: 1rem;
+  padding-inline: 1.5rem;
+  font-size: 1.125rem;
+  font-weight: 700;
+  transition: transform 0.05s;
+}
+.btn:active {
+  transform: scale(0.98);
+}
+
+@utility btn-primary {
+  background-color: var(--color-brand);
+  color: white;
+}
+.btn-primary:active {
+  background-color: var(--color-brand-dark);
+}
+
+@utility btn-secondary {
+  background-color: white;
+  border: 2px solid #d6d3d1;
+  color: var(--color-ink);
+}
+
+@utility input-big {
+  width: 100%;
+  border-radius: 1rem;
+  border: 2px solid #d6d3d1;
+  background: white;
+  padding: 1rem;
+  font-size: 1.125rem;
+  outline: none;
+}
+.input-big:focus {
+  border-color: var(--color-brand);
+}
