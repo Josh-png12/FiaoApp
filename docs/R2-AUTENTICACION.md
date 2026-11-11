@@ -1,8 +1,8 @@
 # R2 — Autenticación, roles y sesiones (documento de DISEÑO)
 
-Estado: **borrador para aprobación. No hay código ni migraciones escritas.**
-Rama: `feat/r2-autenticacion-diseno` (creada desde el árbol de R1; R1 sigue sin commitear, ver §10).
-Convención: cada punto que necesita decisión tuya está marcado **[DECIDIR]** con mi recomendación.
+Estado: **diseño cerrado: todas las decisiones están aprobadas (§11).** Se implementa por pasos (§9); el progreso se ve en `git log`.
+Rama: `feat/r2-autenticacion` (sale de `feat/r1-aislamiento-tienda`, ya commiteada).
+Convención: **DECIDIDO / APROBADA** = decisión tuya incorporada. Ya no queda ningún punto **[DECIDIR]** abierto (resumen en §11).
 
 ---
 
@@ -70,6 +70,7 @@ Convención: cada punto que necesita decisión tuya está marcado **[DECIDIR]** 
 | `tokenVersion` | `Int @default(0)` | Revocación de sesiones (§2.3). |
 | `mustChangePin` | `Boolean @default(false)` | PIN temporal tras alta o reseteo por el OWNER. |
 | `pinChangedAt` | `DateTime?` | Auditoría y futura política de rotación. |
+| `pinHashVersion` | `Int @default(1)` | Versión del esquema de hash del PIN (1 = bcrypt sin pepper; ≥ 2 = bcrypt sobre HMAC con pepper). Permite rotar el pepper (§2.6). |
 | `lastLoginAt` | `DateTime?` | El OWNER ve "último acceso" de cada empleado. |
 
 CHECK (SQL manual en la migración, como en R1):
@@ -82,8 +83,8 @@ CHECK (SQL manual en la migración, como en R1):
 > `migrate diff` y `migrate status` que no intente borrarlo. Si lo intenta, se documenta y se deja el índice fuera
 > del schema con un test de integración que verifique que existe.
 
-**[DECIDIR 4] Celular de empleados.** `phone` queda único **global**. Consecuencia: una persona no puede ser dueña de la
-tienda A y empleada de la B con el mismo celular. *Recomiendo* aceptarlo en el MVP (cero SQL no modelable, y el
+**D4 · DECIDIDO (se acepta lo propuesto). Celular de empleados.** `phone` queda único **global**. Consecuencia: una persona no puede ser dueña de la
+tienda A y empleada de la B con el mismo celular. Se acepta en el MVP (cero SQL no modelable, y el
 celular del empleado es opcional). La alternativa, un índice parcial `UNIQUE(phone) WHERE role='OWNER'`, resuelve el caso
 pero complica el login por celular (hay que filtrar por rol) y el schema.
 
@@ -97,8 +98,8 @@ pero complica el login por celular (hay que filtrar por rol) y el schema.
 - Migración: columna nullable, relleno con un bloque `DO $$` (genera con la misma regla y reintenta ante choque),
   luego `NOT NULL` + `UNIQUE`.
 
-**[DECIDIR 3]** *Recomiendo* 6 caracteres. Con 5 (24 millones) también alcanza para años de tiendas, y es más corto de dictar;
-subir a 6 cuesta poco y deja margen contra enumeración. Dime si prefieres 5.
+**D3 · DECIDIDO: 6 caracteres.** Con 5 (24 millones) también alcanza para años de tiendas, y es más corto de dictar;
+subir a 6 cuesta poco y deja margen contra enumeración.
 
 ### 2.3 Revocación de sesiones: comparación y recomendación
 
@@ -125,12 +126,21 @@ requiere tener el dispositivo, y el dueño siempre puede usar "cerrar todas". Si
 dispositivos uno por uno, se migra a B sin tocar el contrato (`getSession()` sigue igual).
 No recomiendo un caché en memoria de la verificación: con PM2 en modo cluster rompería el "de inmediato".
 
-**[DECIDIR 1]** Confirmar A. Subdecisión: *logout* = solo borrar cookie (recomendado) vs. subir `tokenVersion` en cada logout
-(cierra al dueño en todos sus dispositivos cada vez: mala experiencia).
+**D1 · DECIDIDO: opción A (`tokenVersion`).** `tokenVersion` **sube** en cada uno de estos eventos, cada uno con su `AuthEvent`:
+1. Desactivar a un empleado (en la misma sentencia que `isActive=false`).
+2. Cambiar el PIN propio (cierra las demás sesiones; la actual se reemite con el valor nuevo).
+3. Resetear el PIN de un empleado (lo hace el OWNER).
+4. **"Cerrar sesión en todos los dispositivos"** (botón en Ajustes, para OWNER y EMPLOYEE sobre su propia cuenta).
+5. Reactivar a un empleado.
+
+El **logout normal solo borra la cookie** del dispositivo y no toca `tokenVersion` (D1b, decidido).
+Consecuencia aceptada: un token robado de un dispositivo donde se hizo logout sigue válido hasta su vencimiento o hasta que
+ocurra alguno de los cinco eventos; por eso "cerrar todas" existe y se explica en Ajustes.
 
 ### 2.4 Autoría y anulación
-- `Sale.userId` y `Payment.userId` pasan a llamarse **`createdByUserId`** con `ALTER TABLE ... RENAME COLUMN` y
-  `RENAME CONSTRAINT` de la FK compuesta (solo metadatos, reversible, sin duplicar columnas).
+- `Sale.userId` y `Payment.userId` pasan a llamarse **`createdByUserId`** con `RENAME COLUMN` (más renombrar la FK compuesta y los
+  índices que la incluyan): solo metadatos, reversible, sin columna duplicada (ver D8 abajo). En Prisma, `User` queda con dos relaciones
+  hacia `Sale`/`Payment` (quien creó y quien anuló), así que se nombran (`@relation("SaleCreatedBy")`, `@relation("SaleVoidedBy")`, ídem `Payment`).
 - Obligatorio hacia adelante, **sin inventar historia**: los registros anteriores con NULL se dejan en NULL ("autor
   desconocido, anterior a R2") y se agrega `CHECK ("createdByUserId" IS NOT NULL) NOT VALID`: Postgres lo exige a toda fila
   nueva o modificada y no revisa las existentes. `VALIDATE` queda para cuando no haya NULL.
@@ -140,8 +150,13 @@ No recomiendo un caché en memoria de la verificación: con PM2 en modo cluster 
   (igual que `storeId`; `assertScalarData` rechaza que venga en `data`) y `void(id)` fija `voidedAt` y `voidedByUserId`.
   El cliente nunca decide quién es el autor.
 
-**[DECIDIR 8]** *Recomiendo* renombrar (arriba) en lugar de agregar una columna nueva y dejar `userId` deprecado. Ahorra una
-columna muerta y una migración de limpieza; el renombre es metadatos y es reversible.
+**D8 · DECIDIDO (con cambios): `RENAME COLUMN` escrito a mano, nunca drop + add.** Procedimiento:
+1. Generar el SQL con `prisma migrate diff` (saldrá como `DROP COLUMN` + `ADD COLUMN`).
+2. **Leerlo** y reemplazar esas sentencias por `ALTER TABLE ... RENAME COLUMN "userId" TO "createdByUserId"`, más el renombre de la FK
+   compuesta (`Sale_userId_storeId_fkey` → `Sale_createdByUserId_storeId_fkey`, ídem `Payment`) y de cualquier índice que incluya la
+   columna (`RENAME CONSTRAINT` / `ALTER INDEX ... RENAME TO`), de forma que un `migrate diff` posterior contra el schema salga **vacío**.
+3. En dev, contar filas **antes y después** (totales de `Sale` y `Payment`, y cuántas tienen autor no nulo): deben ser idénticas.
+4. El CHECK de autoría `NOT NULL` va `NOT VALID`: solo exige autor a filas nuevas o modificadas; el histórico no se toca ni se inventa.
 
 ### 2.5 Tablas nuevas
 ```
@@ -152,25 +167,38 @@ AuthEvent  { id, createdAt, type AuthEventType, storeId String?, userId String?,
 Sin FK en `AuthEvent.userId`/`storeId` hacia el aislamiento estricto: se guardan como referencia lógica (un evento de login
 fallido no tiene usuario). Append-only: la app solo hace `INSERT`.
 
+### 2.6 Hash del PIN: pepper y versión (D9, adelantado al paso 3)
+- Esquema v≥2: `bcrypt( base64( HMAC-SHA256( pepper_vN, pin ) ), costo 10 )`. Sin el pepper, una BD filtrada no sirve para probar los
+  10⁴–10⁶ PIN posibles. La salida del HMAC en base64 (44 caracteres) cabe en el límite de 72 bytes de bcrypt.
+- `User.pinHashVersion` guarda la versión: **1 = bcrypt sin pepper** (los hashes actuales), 2, 3… = pepper N. Para **rotar**: se agrega
+  `PIN_PEPPER_V3`, se sube `PIN_PEPPER_CURRENT_VERSION=3`, y cada usuario se re-hashea solo al iniciar sesión (se verifica con su versión
+  y, si es menor que la vigente, se recalcula y se guarda). Los hashes v1 existentes siguen entrando y se actualizan en su próximo login.
+- El pepper vive en variables de entorno **distintas de `JWT_SECRET`**: `PIN_PEPPER_V2` (≥ 32 bytes aleatorios) y
+  `PIN_PEPPER_CURRENT_VERSION`. `.env.example` trae placeholders con el comando para generarlos; **nunca se commitean valores reales**.
+- **En producción la app no arranca si falta** el pepper vigente o es corto (comprobación al iniciar, en `lib/env.ts` invocado desde
+  `instrumentation.ts`). En desarrollo y pruebas se usa un valor fijo de desarrollo, con advertencia.
+- El `bcrypt.compare` simulado (usuario inexistente) usa un hash de la versión vigente para que el tiempo sea comparable.
+- Riesgo operativo: **si se pierde el pepper nadie puede iniciar sesión** (habría que resetear todos los PIN). Se guarda en el gestor de
+  contraseñas y en las variables del VPS; en una rotación se conservan los peppers anteriores mientras queden usuarios en esa versión.
+
 ---
 
 ## 3. Flujos
 
 **3.1 Registro de tienda (OWNER)** — `POST /api/auth/register`
-1. Límite por IP (§5). 2. Validar (zod), `normalizePhone`, política de PIN (§5.1). 3. `bcrypt.hash` **fuera** de la transacción.
+1. Límite por IP (§5). 2. Validar (zod), `normalizePhone`, política de PIN (§5.1). 3. Calcular el hash del PIN (HMAC con pepper y luego `bcrypt`, §2.6) **fuera** de la transacción.
 4. Transacción: crear `Store` (con código, reintento ante `P2002`) + `User` OWNER. `P2002` en `phone` ⇒ 409 (hoy es un 500
 por carrera). 5. `AuthEvent STORE_REGISTERED`. 6. Firmar token con `tv=0`, poner cookie.
 7. La pantalla de éxito muestra el código de la tienda ("Este es el código para tus empleados"); queda visible en Ajustes.
 
 **3.2 Login OWNER** — celular + PIN
-1. Revisar bloqueo por IP y por cuenta (clave `acct:phone:<hash>`). Si está bloqueada ⇒ 429 genérico (se bloquea
-igual exista o no la cuenta, para no revelar existencia). 2. Buscar `User` por `phone`. 3. **Siempre** ejecutar `bcrypt.compare`
-(contra un hash falso si no existe) para igualar tiempos. 4. Si falla, o si `isActive` / `Store.isActive` es falso ⇒
-mismo mensaje "Celular o PIN incorrecto", cuenta el intento. 5. Si pasa: limpiar contador, `lastLoginAt`, `AuthEvent LOGIN_OK`,
+1. Revisar los bloqueos de §5.2 (cuenta+IP, cuenta, IP). Si está bloqueada ⇒ 429 genérico (se bloquea
+igual exista o no la cuenta, para no revelar existencia). 2. Buscar `User` por `phone`. 3. **Siempre** hacer la verificación del PIN (HMAC + `bcrypt.compare`); si el celular no existe, se compara contra un hash simulado de la versión vigente, para no filtrar qué celulares están registrados. 4. Si falla, o si `isActive` / `Store.isActive` es falso ⇒
+mismo mensaje "Celular o PIN incorrecto", cuenta el intento. 5. Si pasa: limpiar contadores, re-hashear si la versión del hash es anterior a la vigente (§2.6), `lastLoginAt`, `AuthEvent LOGIN_OK`,
 token con el `tokenVersion` actual, cookie.
 
 **3.3 Login EMPLOYEE** — código de tienda + usuario + PIN
-Igual que 3.2 con clave de cuenta `acct:emp:<código>:<usuario>`; se busca la tienda por código y el usuario por
+Igual que 3.2 con identificador de cuenta `emp:<código>:<usuario>` (§5.2); este flujo se implementa en el paso 4; se busca la tienda por código y el usuario por
 `(storeId, username)`. La UI trae un interruptor "Entro como empleado". Si `mustChangePin` es verdadero, la sesión solo
 permite la acción `pin.change` (se aplica en el envoltorio de rutas, §4.2) hasta que el empleado elija su PIN.
 
@@ -184,7 +212,7 @@ sesiones), reemite la cookie actual, limpia `mustChangePin`, `AuthEvent PIN_CHAN
 **3.6 Reseteo de PIN de empleado (OWNER)** — el sistema genera un PIN temporal aleatorio de 6 dígitos (válido según la
 política), lo muestra **una sola vez**, pone `mustChangePin=true`, sube `tokenVersion` y registra `PIN_RESET_BY_OWNER`.
 El OWNER también puede desbloquear la cuenta de un empleado (borra su fila de `RateLimit`).
-**[DECIDIR 6]** *Recomiendo* PIN temporal generado + cambio obligatorio: el dueño nunca conoce el PIN definitivo del empleado,
+**D6 · DECIDIDO:** PIN temporal generado + cambio obligatorio: el dueño nunca conoce el PIN definitivo del empleado,
 y la autoría de cada venta queda defendible. La alternativa (el dueño elige el PIN) es más simple pero le permite
 actuar "como" el empleado.
 
@@ -202,7 +230,7 @@ sus ventas siguen atribuidas. Reactivar es posible y exige PIN nuevo. El OWNER n
 ### 4.1 Token y cookie
 - Token mínimo: `sub` (userId), `sid` (storeId), `tv` (tokenVersion), `iat`, `exp`. Se **elimina `role` y `name`** del token:
   el rol sale siempre de la BD, así un cambio de rol o una baja aplican al instante.
-- **Duración [DECIDIR 2]**: *recomiendo* 30 días con renovación deslizante (se reemite cuando el token tiene más de 7 días
+- **Duración (D2 · DECIDIDO)**: 30 días con renovación deslizante (se reemite cuando el token tiene más de 7 días
   de antigüedad; lo hace el middleware, que sí puede escribir cookies) y tope absoluto de 90 días desde el último login
   (claim `auth_at`). Con la revocación en BD ya no hay que usar 90 días fijos "por si acaso".
 - Cookie: `httpOnly`, `secure` en producción, `path=/`. En producción el nombre es `__Host-fiao_session` (obliga `Secure`,
@@ -211,8 +239,7 @@ sus ventas siguen atribuidas. Reactivar es posible y exige PIN nuevo. El OWNER n
   `strict` llegarían sin sesión. La defensa CSRF es `lax` + verificación del `Origin`/`Host` en todo `POST/PUT/PATCH/DELETE`
   de `/api` (en el middleware).
 - Al arrancar: `JWT_SECRET` debe tener al menos 32 bytes, si no, falla fuerte.
-- Con el cambio, los tokens actuales (sin `tv`) quedan inválidos: todos vuelven a entrar una vez. **[DECIDIR 11]** *Recomiendo*
-  aceptarlo (hoy hay 2 usuarios en dev, y evita confiar en `role` del token viejo).
+- Con el cambio, los tokens actuales (sin `tv`) quedan inválidos: todos vuelven a entrar una vez. **D11 · DECIDIDO:** se acepta (hoy hay 2 usuarios en dev, y evita confiar en `role` del token viejo).
 
 ### 4.2 Reparto de responsabilidades
 
@@ -258,7 +285,7 @@ inyecta `ctx` con `db` ya ligado a la tienda y al usuario. `ctx` es lo único qu
 | Ajustes de la tienda (`store.settings`) | ✅ | ❌ |
 | Cambiar mi propio PIN / cerrar mis sesiones (`pin.change`, `session.revoke`) | ✅ | ✅ |
 
-**[DECIDIR 5]** Los puntos con `?`. *Recomiendo*: el empleado **crea** clientes (sin eso no puede fiar a alguien nuevo) pero no los
+**D5 · DECIDIDO (como se propuso).** Los puntos con `?` quedan así: el empleado **crea** clientes (sin eso no puede fiar a alguien nuevo) pero no los
 edita ni archiva; no registra entradas de inventario; ve "Hoy" solo con lo que él registró y sin ganancia; el cierre de caja es
 del OWNER en la v1. Si el empleado necesita hacer el cierre, se agrega la acción sin tocar el modelo.
 
@@ -277,7 +304,7 @@ del OWNER en la v1. Si el empleado necesita hacer el cierre, se agrega la acció
 ## 5. Fuerza bruta y política de PIN
 
 ### 5.1 PIN
-- Largo **4 a 6 dígitos** (se mantiene). **[DECIDIR 7]**: *recomiendo mantener 4–6*: un PIN de 4 dígitos es lo que el tendero
+- Largo **4 a 6 dígitos** (se mantiene). **D7 · DECIDIDO:** se mantiene 4–6: un PIN de 4 dígitos es lo que el tendero
   usará; la protección real son el bloqueo (§5.2) y el pepper (§7). Subir el mínimo a 6 mejora poco frente a un bloqueo bien puesto
   y empeora mucho el uso.
 - Se rechazan al **crear o cambiar** un PIN: todos iguales (`0000`, `7777`), secuencias ascendentes o descendentes
@@ -286,28 +313,61 @@ del OWNER en la v1. Si el empleado necesita hacer el cierre, se agrega la acció
   viven en una función pura `validatePin(pin, { phone? })` con tests.
 - Los PIN existentes no se tocan; la regla aplica al próximo cambio. (Si un OWNER actual tiene `1234`, se le avisa en Ajustes.)
 
-### 5.2 Límite de intentos, en Postgres, sin Redis
-Una sola tabla `RateLimit` con una sentencia atómica por intento (`INSERT ... ON CONFLICT (key) DO UPDATE ... RETURNING`):
+### 5.2 Límite de intentos (Postgres, sin Redis)
+Objetivo de **D7**: frenar la adivinanza **sin** que un tercero pueda dejar fuera al dueño. Para eso el bloqueo se cuenta por **cuenta + IP**
+y no solo por cuenta. Una sola tabla `RateLimit`, una sentencia atómica por intento (`INSERT ... ON CONFLICT (key) DO UPDATE ... RETURNING`).
 
-| Clave | Umbral propuesto | Efecto |
+`h(cuenta)` = HMAC del identificador normalizado (`phone:<celular>` o `emp:<código>:<usuario>`); `h(ip)` = HMAC de la IP de §5.3.
+
+| Clave de conteo | Qué cuenta | Umbral | Efecto |
+|---|---|---|---|
+| `acctip:<h(cuenta)>:<h(ip)>` | fallos contra ESA cuenta desde ESA IP | 5 en 15 min | bloquea ese par (cuenta, IP) |
+| `acct:<h(cuenta)>` | fallos contra la cuenta desde CUALQUIER IP | 25 en 1 h | bloquea el CONTADOR DE CUENTA (D15: no cuenta lo que llenan otras IPs si esta IP es conocida) |
+| `ip:<h(ip)>:login` | fallos desde esa IP contra cualquier cuenta | 30 en 10 min | bloquea esa IP para login |
+| `ip:<h(ip)>:register` | registros desde esa IP | 5 por hora | bloquea esa IP para registrar |
+
+**Progresión (D7).** El **primer bloqueo es de 5 minutos.** Solo escala si los ciclos **se repiten**: `strikes` sube únicamente cuando, tras
+desbloquearse, se vuelve a alcanzar el umbral dentro de 24 h: 5 min → 15 min → 60 min (**máximo 1 hora**). Sin fallos durante 24 h,
+`strikes` vuelve a 0. Un login correcto borra la fila `acctip` de ese par y reduce el conteo `acct`.
+
+**Por qué un tercero no deja fuera al dueño.**
+- Quien teclea mal desde su propia IP solo bloquea el par (cuenta, su IP); el dueño, desde la suya, tiene su propio contador en cero.
+- Para bloquear la cuenta completa hacen falta ≥ 25 fallos repartidos entre varias IPs (infraestructura de ataque), el bloqueo dura 5 minutos
+  (máximo 1 hora si el ataque persiste) y el contador de cuenta **no le cierra la puerta al dueño desde una IP desde la que ya entró antes** (D15; no es un acceso extra: su límite por (cuenta, IP) sigue aplicando siempre).
+- Las sesiones abiertas no se tocan: el bloqueo es solo del login.
+- Límite honesto: un ataque distribuido y sostenido aún puede incomodar al dueño desde una IP nueva hasta 1 hora. No se elimina del todo
+  sin dispositivos de confianza (deuda, §10).
+
+Resto de reglas:
+- La respuesta de bloqueo es **idéntica** exista o no la cuenta (se cuenta también para cuentas inexistentes), para no revelar existencia.
+- Límite por IP **generoso**: en Colombia muchos celulares comparten IP (CGNAT). El control principal es el de cuenta + IP.
+- Costo en Neon: una escritura por intento de login (~una vez al mes por dispositivo), cero para el tráfico normal. Limpieza de `RateLimit` a las **24–48 h** (borrado oportunista de
+  filas con más de 48 h sin actividad; un job o el propio login las purga). Es un freno suficiente para este uso, no un limitador de alto volumen.
+- `bcrypt.compare` bloquea el event loop con `bcryptjs`: el límite por IP evita que se use como amplificador de carga.
+- El OWNER puede desbloquear a un empleado (borra sus filas `acctip` y `acct`).
+
+**D15 · APROBADA con precisiones: "IP conocida".** Una IP es *conocida* para una cuenta si su HMAC tuvo un `LOGIN_OK` de esa cuenta en los últimos 30 días
+(`AuthEvent`). Reglas:
+- El límite por **(cuenta, IP) aplica SIEMPRE**, también desde una IP conocida.
+- La IP conocida solo evita que cuente, contra ese dueño, el **contador de cuenta** (`acct:`) que llenan **otras** IPs. **Nunca otorga acceso adicional**:
+  no salta el PIN, ni el bloqueo del par, ni el de IP.
+- Es una **señal débil**: en Colombia las IPs móviles son compartidas (CGNAT) y cambian; una IP "conocida" puede pertenecer a otra persona del mismo operador.
+  Por eso solo sirve para no castigar de más al dueño, nunca para dar confianza.
+
+### 5.3 IP del cliente: un solo helper, `getClientIp()` (D7)
+Archivo `lib/client-ip.ts`. **Regla: la IP se lee de UN header, el que el despliegue declare de confianza en la variable `CLIENT_IP_HEADER`.
+Nunca se confía ciegamente en `x-forwarded-for`**: el cliente puede enviarlo con valores falsos para esquivar los límites.
+
+| Despliegue | `CLIENT_IP_HEADER` | Condición para confiar |
 |---|---|---|
-| `acct:phone:<hash>` / `acct:emp:<código>:<usuario>` | 5 fallos en 15 min | Bloqueo 5 min; cada reincidencia duplica: 5 → 10 → 20 → 40 → 60 min (tope 1 h) |
-| `ip:<ip>:login` | 30 fallos en 10 min | Bloqueo 10 min |
-| `ip:<ip>:register` | 5 registros por hora | Bloqueo 1 h |
+| VPS + Nginx (el plan actual) | `x-real-ip` | Nginx lo **sobrescribe** (`proxy_set_header X-Real-IP $remote_addr;`, sin pasar el del cliente) y Node escucha solo en `127.0.0.1` (el puerto de la app no queda expuesto) |
+| Cloudflare delante de Nginx | `cf-connecting-ip` | El Nginx acepta solo conexiones desde los rangos de Cloudflare |
+| Otra plataforma administrada | el header que documente la plataforma | Se revisa caso por caso antes de usarla |
+| Desarrollo / pruebas | (vacío) | Se usa `127.0.0.1`; los tests inyectan la IP |
 
-- El contador de cuenta se aplica **igual a cuentas que no existen** (clave por hash del identificador): la respuesta de bloqueo
-  no revela si la cuenta existe. Éxito ⇒ se borra la fila de esa cuenta.
-- **Bloqueo temporal progresivo y no definitivo**, a propósito: con un bloqueo permanente alguien podría dejar fuera al dueño
-  tecleando mal su celular. El OWNER puede desbloquear a un empleado.
-- **Límite por IP generoso**: en Colombia muchos celulares comparten IP (CGNAT de operadores). El control principal es el de cuenta;
-  el de IP solo frena escaneos masivos. La IP se toma de `X-Forwarded-For` **solo si** viene del Nginx propio (a definir en el
-  deploy; hasta entonces, la conexión directa).
-- **Costo en Neon**: una escritura por intento de login (el login ocurre ~una vez al mes por dispositivo), cero para el
-  tráfico normal. Limpieza: borrado de filas de más de 1 día de forma oportunista. Una tabla en Postgres no es un límite de
-  velocidad de alto volumen; para este uso sobra.
-- `bcrypt.compare` es costoso (bloquea el event loop con `bcryptjs`): el límite por IP también evita que se use como
-  amplificador de carga.
-**[DECIDIR 7b]** Los umbrales de la tabla son punto de partida. *Recomiendo* aprobarlos y ajustar con datos reales.
+Detalles: si el header trae una lista separada por comas se toma la **última** entrada (la que añadió nuestro proxy), nunca la primera; el valor
+se valida con `net.isIP` y, si no es válido o falta, se devuelve `"unknown"`. **Recomendación:** en producción la app **no arranca** sin
+`CLIENT_IP_HEADER`, igual que con el pepper (evita desplegar sin límite por IP real). Se guarda solo el HMAC de la IP (D13, aprobada), calculado con una clave propia **`IP_HASH_KEY`** (≥ 32 bytes aleatorios), **distinta del pepper del PIN y de `JWT_SECRET`**; placeholder en `.env.example`, nunca commiteada, y en producción la app no arranca si falta. Rotarla rompe la correlación histórica de IPs (no las sesiones).
 
 ---
 
@@ -321,86 +381,110 @@ Una sola tabla `RateLimit` con una sentencia atómica por intento (`INSERT ... O
 Nunca PIN (ni en claro ni hash), tokens, ni cookies. En fallos no se guarda el celular o usuario escrito: solo un **hash HMAC** del
 identificador (sirve para correlacionar intentos). El `meta` solo lleva datos no sensibles (p. ej. el `userId` afectado).
 La IP se guarda como hash HMAC (no en claro) y el `userAgent` recortado. Es la postura más prudente frente a la Ley 1581
-(datos personales); si quieres la IP en claro para investigar incidentes, es [DECIDIR] menor.
+(datos personales); si quieres la IP en claro para investigar incidentes, se mantiene el HMAC con `IP_HASH_KEY` (D13, aprobada).
 
 ### 6.3 Retención y visibilidad
-Retención 180 días (borrado oportunista). El OWNER ve "último acceso" por empleado y los últimos eventos de su tienda (sin hashes).
+Retención: **`AuthEvent` 180 días** (borrado oportunista); **`RateLimit` se limpia a las 24–48 h** (D14, aprobada). El OWNER ve "último acceso" por empleado y los últimos eventos de su tienda (sin hashes).
 
-### 6.4 Interacción con el modo offline (importante para el Sprint de sync)
-- El servidor decide el autor: en `/api/sync` el `createdByUserId` **no se lee del payload como verdad**; se valida contra la sesión.
-- Caso real: un celular compartido donde el empleado A registra offline y luego entra B. **[DECIDIR 10]** *Recomiendo*: cada
-  mutación de la cola guarda `authorUserId`; el servidor la acepta si `authorUserId` pertenece a la tienda de la sesión y la
-  sesión es de ese mismo usuario **o del OWNER**; un EMPLOYEE no puede subir mutaciones de otro.
-- Un empleado dado de baja con mutaciones pendientes: se aceptan las creadas **antes** de `deactivatedAt` (por eso la columna) y
-  se rechazan las posteriores, que quedan marcadas "rechazada" en la cola para que el OWNER las vea. Nunca se pierden en silencio.
-- Un 401 del servidor durante el sync **no vacía la cola**: la app pide volver a entrar y reintenta.
+### 6.4 Interacción con el modo offline (D10: principio aceptado, **NO se implementa ahora**)
+Se implementa junto con la fase offline (paso 5). Queda documentado aquí para no decidir a ciegas entonces.
+
+- **Principio.** El servidor decide el autor: en `/api/sync` el `createdByUserId` no se toma del payload como verdad. Cada mutación lleva
+  `authorUserId` y el servidor la acepta solo si ese usuario pertenece a la tienda de la sesión y la sesión es de ese mismo usuario **o del
+  OWNER**. Un EMPLOYEE no sube mutaciones de otro.
+- **Riesgo: el reloj del dispositivo no es confiable.** La fecha de una mutación (`createdAtClient`) la pone el dispositivo. Un empleado dado
+  de baja podría adelantar o atrasar el reloj para que sus movimientos parezcan anteriores a `deactivatedAt`. Por eso la fecha del cliente
+  **nunca será un control de seguridad**, solo un dato informativo. El servidor guarda siempre `receivedAt` con su propio reloj.
+- **Propuesta: marcar "sincronizado tarde" (`syncedLate`), visible para el dueño.** Se marca todo movimiento que (a) llegue de un autor ya
+  desactivado o (b) tenga una diferencia grande entre `createdAtClient` y `receivedAt` (umbral por definir, p. ej. 24 h). No se pierden ni se
+  rechazan en silencio: se guardan atribuidos a su autor, con la marca, y el OWNER puede revisarlos y anularlos (append-only). Los de un autor
+  desactivado quedarían además "pendientes de confirmar" por el OWNER.
+- Un 401 durante el sync **no vacía la cola**: la app pide volver a entrar y reintenta.
+- **Pendiente para entonces:** umbral de "tarde", si la confirmación aplica a todo lo de un autor desactivado, y la pantalla del OWNER.
 
 ---
 
 ## 7. Migración de datos existentes (no destructiva y reversible)
 
-Patrón expandir → rellenar → restringir, en **una** migración revisable, con `down.sql` escrito y probado en la BD de pruebas
-(Prisma no tiene "down"; se guarda en la carpeta de la migración y **no** se ejecuta solo).
+Patrón expandir → rellenar → restringir, en **una** migración revisable. El SQL se genera con `prisma migrate diff`, **se lee y se edita a mano**
+(en particular el renombre, D8) y se escribe un `down.sql`, probado en la BD de pruebas (Prisma no tiene "down": vive en la carpeta de la
+migración y no se ejecuta solo). Nunca `db push`, `migrate dev` ni `migrate reset`.
 
 Orden:
-1. `ALTER TABLE "User"`: `phone DROP NOT NULL`; agregar `username`, `tokenVersion DEFAULT 0`, `mustChangePin DEFAULT false`,
-   `deactivatedAt`, `pinChangedAt`, `lastLoginAt`.
-2. Verificar antes de seguir: todo usuario existente tiene `role = 'OWNER'` o se le asigna; **cada tienda queda con exactamente
-   un OWNER** (si alguna tuviera varios, la migración se detiene y reporta; no elige por su cuenta).
-3. `Store.code`: columna nullable → relleno → `NOT NULL` + `UNIQUE`.
-4. Crear `RateLimit` y `AuthEvent`.
-5. Renombrar `userId → createdByUserId` (con sus FK) en `Sale` y `Payment`; agregar `voidedByUserId` (+ FK compuesta).
-6. CHECKs: rol/phone/username, índice parcial de OWNER único, `createdByUserId IS NOT NULL NOT VALID`, simetría de anulación.
+1. **Conteos "antes" en dev** (solo lectura): filas por tabla; `Sale` y `Payment` con `userId` no nulo; usuarios por rol; tiendas sin OWNER o con varios. Se guardan para comparar.
+2. `ALTER TABLE "User"`: `phone DROP NOT NULL`; agregar `username`, `tokenVersion DEFAULT 0`, `mustChangePin DEFAULT false`,
+   `pinHashVersion DEFAULT 1`, `deactivatedAt`, `pinChangedAt`, `lastLoginAt`.
+3. **Verificación previa que detiene la migración** si falla (no elige por su cuenta): todo usuario tiene rol; cada tienda tiene exactamente un OWNER activo.
+4. `Store.code`: columna nullable → relleno (bloque `DO $$`, mismo alfabeto, reintento ante choque) → `NOT NULL` + `UNIQUE`.
+5. Crear `RateLimit` y `AuthEvent`.
+6. **`RENAME COLUMN` a mano** de `Sale.userId` y `Payment.userId` a `createdByUserId`, con renombre de la FK compuesta y de los índices que la incluyan
+   (§2.4, D8). Agregar `voidedByUserId` y su FK compuesta en `Sale`, `Payment` y `StockEntry`.
+7. CHECK: rol/phone/username; índice único parcial de OWNER; `createdByUserId IS NOT NULL` **`NOT VALID`**; simetría `voidedAt`/`voidedByUserId`.
+8. **Conteos "después" en dev** y comparación con los de "antes": mismas filas por tabla, mismos autores no nulos que los `userId` de antes, y
+   `prisma migrate diff` del schema contra la BD **vacío**.
 
-`down.sql`: deshace en orden inverso. Dos límites honestos: devolver `phone` a `NOT NULL` solo funciona **mientras no haya empleados
-sin celular**, y los datos escritos en columnas nuevas (usuarios, autoría de ventas posteriores) se pierden al volver atrás.
-Ningún dato original se modifica ni se borra.
+`down.sql` deshace en orden inverso (incluido el `RENAME COLUMN` de vuelta). Límites honestos: devolver `phone` a `NOT NULL` solo funciona
+**mientras no existan empleados sin celular**, y los datos escritos en columnas nuevas (usuarios, autoría de movimientos posteriores) se pierden
+al volver atrás. Ningún dato original se modifica ni se borra.
 
-Se aplica primero a la BD de **pruebas**, luego (con tu aprobación) a desarrollo, con el mismo procedimiento que R1
-(URL directa, `migrate deploy`, verificación en `pg_constraint`).
+Se aplica primero a la BD de **pruebas**; a dev solo con tu aprobación, con el mismo procedimiento que R1 (URL directa sin `-pooler`,
+`migrate deploy`, verificación en `pg_constraint`).
 
 ---
 
 ## 8. Pruebas (lista concreta)
 
 **Integración (BD de pruebas)**
-- Aislamiento: el mismo `username` en dos tiendas es válido; repetido en la misma, `P2002`; el código de tienda es único; un
-  EMPLOYEE de la tienda A no puede leer ni escribir datos de B a través de `route()`/`storeDb`.
+- Aislamiento: el mismo `username` en dos tiendas es válido; repetido en la misma, `P2002`; el código de tienda es único; un EMPLOYEE de la tienda A no
+  puede leer ni escribir datos de B a través de `route()`/`storeDb`.
 - Un solo OWNER por tienda (el segundo se rechaza); OWNER sin celular y EMPLOYEE sin usuario se rechazan por CHECK.
-- Autoría: crear venta/abono guarda el `createdByUserId` de la sesión; un `createdByUserId` en el `data` se rechaza; anular guarda
-  `voidedByUserId`; `voidedAt` sin `voidedByUserId` se rechaza; `createdByUserId` de otra tienda se rechaza por FK.
-- Migración: sobre una copia con usuarios y ventas sembrados con el schema viejo, tras migrar todos quedan OWNER, ninguna fila
-  se pierde, las ventas viejas conservan su autor (o NULL), y `down.sql` devuelve el esquema anterior.
-- Revocación: desactivar a un empleado hace que su siguiente request dé 401; `tokenVersion+1` invalida el token anterior;
-  tienda con `isActive=false` también.
-- Bloqueo: 5 fallos → 6.º intento bloqueado aunque el PIN sea el correcto; una cuenta inexistente se bloquea igual y con el mismo
-  mensaje; tras el tiempo de bloqueo vuelve a funcionar; éxito limpia el contador; el OWNER desbloquea a un empleado; el límite por IP.
-- Carrera de registro: dos `register` simultáneos con el mismo celular → uno 201 y otro 409 (no 500).
+- Autoría: crear venta/abono guarda el `createdByUserId` de la sesión; un `createdByUserId` en el `data` se rechaza; anular guarda `voidedByUserId`;
+  `voidedAt` sin `voidedByUserId` se rechaza; un autor de otra tienda se rechaza por FK.
+- Migración: sobre una copia con usuarios y ventas sembrados con el schema viejo, tras migrar todos quedan OWNER, **los conteos antes y después
+  coinciden**, las ventas viejas conservan su autor (o NULL) y `down.sql` devuelve el esquema anterior. `migrate diff` posterior queda vacío.
+- Revocación: desactivar a un empleado hace que su siguiente request dé 401; cada evento que sube `tokenVersion` (D1) invalida el token anterior;
+  el logout normal **no** lo invalida; tienda con `isActive=false` también da 401.
+- Bloqueo (D7): 5 fallos desde la IP X contra la cuenta C → 6.º intento bloqueado desde X aunque el PIN sea correcto, **y el dueño desde la IP Y sigue
+  entrando** (un tercero no lo deja fuera); ≥ 25 fallos repartidos en varias IPs bloquean la cuenta 5 min, salvo desde una IP conocida (D15);
+  el primer bloqueo es de 5 min y solo escala a 15 y 60 si el ciclo se repite en 24 h (tope 1 h); tras 24 h sin fallos vuelve a 5 min; una cuenta
+  inexistente se bloquea igual y con el mismo mensaje; un login correcto limpia el par; el límite por IP.
+- Carrera de registro: dos `register` simultáneos con el mismo celular → uno 201 y otro **409** (no 500).
 
 **Unitarias**
-- `validatePin` (triviales, secuencias, patrones, igual al celular, años); normalización y alfabeto del código de tienda;
-  `can()` contra la matriz completa (tabla de verdad); generación del código (sin caracteres ambiguos, longitud).
+- `validatePin` (triviales, secuencias, patrones, igual al celular, años); normalización y alfabeto del código de tienda; `can()` contra la matriz completa.
+- `getClientIp`: lee solo el header configurado; ignora `x-forwarded-for` si no es el configurado; con lista toma la última entrada; valor inválido → `"unknown"`;
+  producción sin `CLIENT_IP_HEADER` → error al arrancar.
+- Pepper (D9): el hash v2 verifica con su pepper y no con otro; un hash v1 existente verifica y se re-hashea a la versión vigente; el hash guardado no
+  contiene el PIN ni coincide con `bcrypt(pin)` sin pepper; en producción, sin pepper o con uno corto → no arranca.
+- Login con celular inexistente: se llama a `bcrypt.compare` (simulado) igual que con uno existente (el test comprueba la llamada, no mide milisegundos).
 
 **De rutas / contrato**
-- EMPLOYEE recibe 403 en cada acción prohibida (anular venta/abono, precios, archivar cliente, estadísticas de ganancia,
-  empleados, ajustes) y 200 en las permitidas. OWNER recibe 200.
-- Sin cookie → 401; token con firma mala o `tv` viejo → 401; `mustChangePin` bloquea todo salvo `pin.change`.
+- Middleware (paso 2): `/login`, `/registro`, `/api/auth/login`, `/api/auth/register` son públicas por **coincidencia exacta**; `/login-x`, `/registro-x`,
+  `/api/auth/login-x` **no** lo son.
+- Origen: `POST/PUT/PATCH/DELETE` a `/api` con `Origin` ajeno → 403; los `GET` no se revisan.
+- EMPLOYEE recibe 403 en cada acción prohibida (anular, precios, archivar cliente, estadísticas de ganancia, empleados, ajustes) y 200 en las permitidas
+  (con sesiones sintéticas, mientras no existan las pantallas de empleados). OWNER recibe 200.
+- Sin cookie → 401; firma mala o `tv` viejo → 401; `mustChangePin` bloquea todo salvo `pin.change`.
 - El test de cobertura de §4.4 (todas las rutas envueltas).
-- Cookie: atributos `httpOnly`, `sameSite=lax`, `secure` en producción, prefijo `__Host-`. `Origin` ajeno en POST → 403.
-- Tiempos: login con celular inexistente y con celular existente y PIN malo tardan lo mismo (tolerancia amplia; el test comprueba que
-  ambos llaman a `compare`, no mide milisegundos).
+- Cookie: `httpOnly`, `sameSite=lax`, `secure` en producción, prefijo `__Host-`.
 
 ---
 
 ## 9. Pasos de implementación (cada uno verificable)
 
-| # | Paso | Criterio de aceptación |
-|---|---|---|
-| **1** | **Schema + migración** (§2 y §7) con `down.sql`; tests de integración de constraints y de migración | `migrate deploy` limpio en pruebas; `down.sql` probado; los tests de BD de §8 pasan; `migrate status` limpio; sin tocar dev |
-| **2** | **Núcleo de sesión y autorización**: token mínimo con `tv`, `getSession()` con BD, cookie endurecida, middleware delgado + `Origin`, `lib/authz.ts` (matriz), `route()`/`publicRoute()`, regla ESLint y test de cobertura; las consultas de `app/api/auth` pasan a `lib/` (se retira la excepción de ESLint) | Tests de revocación, 401/403 y cobertura pasan; ESLint falla si una ruta no se envuelve; medida de latencia de `getSession()` reportada |
-| **3** | **Registro y login OWNER seguros**: `validatePin`, `RateLimit` + bloqueo, igualación de tiempos, 409 en carrera, código de tienda, `AuthEvent`, logout/cambio de PIN/cerrar todas | Tests de bloqueo, de PIN y de registro pasan; el OWNER existente entra con su PIN actual (tras re-login único) |
-| **4** | **Empleados**: alta/baja/reseteo/desbloqueo, login de empleado, `mustChangePin`, `storeDb({storeId,userId})` con autoría y `void`, pantallas mínimas (login con código, Ajustes › Empleados) | Un empleado inicia sesión, registra una venta con su autoría, no puede anular (403); al desactivarlo su siguiente request da 401 |
-| **5** | **Endurecimiento y contrato de sync**: pepper del PIN con rehash al iniciar sesión, retención de `AuthEvent`/`RateLimit`, contrato de autoría offline documentado y con tests de la regla de §6.4 | Los hashes antiguos siguen funcionando y se reemplazan al entrar; tests de la regla de sync pasan |
+**Orden y alcance.** Los pasos **1 a 3 van ANTES del Sprint 1** (fiados): así las rutas de fiados nacen ya con `route()`, con autoría y con el login seguro.
+El **paso 4 (pantallas y flujos de empleados) va DESPUÉS del Sprint 1.** El **paso 5 (contrato de sync offline) va con la fase offline.**
+
+`Paso 1 → Paso 2 → Paso 3 → [Sprint 1: fiados] → Paso 4 → [fase offline] → Paso 5`
+
+| # | Paso | Qué incluye | Criterio de aceptación |
+|---|---|---|---|
+| **1** | **Schema + autoría** (antes del Sprint 1) | Todo el schema de §2 (columnas de `User`, `Store.code`, `RateLimit`, `AuthEvent`, `pinHashVersion`); `RENAME COLUMN` **a mano** `userId → createdByUserId` + FK e índices; `voidedByUserId`; CHECK (`createdByUserId` `NOT VALID`); `down.sql`; tests de BD | SQL generado con `migrate diff`, leído y editado; en pruebas: `migrate deploy` limpio, `down.sql` probado, `migrate diff` posterior vacío; **conteos antes/después en dev idénticos** (con tu aprobación para tocar dev); tests de BD de §8 pasan |
+| **2** | **Núcleo de sesión y `route()`** (antes del Sprint 1) | Token mínimo con `tv`; `getSession()` con lectura a BD; cookie endurecida; **middleware con rutas públicas por coincidencia EXACTA (no `startsWith`) y validación de `Origin` en los métodos que modifican**; `lib/authz.ts` (matriz) y `route()`/`publicRoute()`; regla ESLint + test de cobertura; `storeDb({storeId, userId})` con autoría y `void`; las consultas de `app/api/auth` pasan a `lib/` (se retira la excepción de ESLint) | Tests de middleware (`/login-x` no público; `Origin` ajeno → 403), de revocación, 401/403 y de cobertura pasan; ESLint falla si una ruta no se envuelve; latencia medida de `getSession()` reportada |
+| **3** | **Registro y login OWNER seguros, con pepper** (antes del Sprint 1) | `validatePin`; `RateLimit` con claves cuenta+IP/cuenta/IP; `getClientIp()` (§5.3); **hash del PIN = HMAC-SHA256(pepper) + bcrypt, con `pinHashVersion`** (§2.6), variables de pepper distintas de `JWT_SECRET`, placeholders en `.env.example` y arranque que falla en producción si faltan; **`P2002` en la carrera de registro → 409**; **`bcrypt.compare` simulado cuando el celular no existe**; `AuthEvent`; código de tienda generado en el registro; cambio de PIN propio y "cerrar todas" (suben `tokenVersion`); logout | Tests de §8 (bloqueo, pepper, IP, PIN, carrera 409, compare simulado) pasan; el OWNER existente entra con su PIN actual (hash v1 → se actualiza al entrar); `typecheck`, `lint`, `test`, `test:integration` y `build` verdes |
+| — | **Sprint 1: fiados** | Usa `route()`, `storeDb({storeId,userId})` y `createdByUserId` desde el primer día | (lo define el Prompt 4) |
+| **4** | **Empleados** (después del Sprint 1) | Alta, baja, reactivación, reseteo de PIN y desbloqueo; login de empleado (código + usuario + PIN); `mustChangePin`; pantallas (login con código, Ajustes › Empleados) | Un empleado entra, registra una venta con su autoría, no puede anular (403); al desactivarlo, su siguiente request da 401 |
+| **5** | **Contrato de sync offline** (con la fase offline) | Regla de autoría de §6.4 (D10): `authorUserId`, `receivedAt`, "sincronizado tarde" visible al dueño, reloj no confiable | Tests de la regla de sync; una mutación de un autor desactivado queda marcada y no se pierde |
 
 Cada paso cierra con `typecheck`, `lint`, `test`, `test:integration` y `build` verdes, y se entrega con su reporte antes de empezar el siguiente.
 
@@ -408,40 +492,51 @@ Cada paso cierra con `typecheck`, `lint`, `test`, `test:integration` y `build` v
 
 ## 10. Riesgos y deuda (qué queda fuera y por qué)
 
-- **Pepper del PIN [DECIDIR 9]**: un PIN de 4–6 dígitos tiene 10⁴–10⁶ combinaciones; si la BD se filtra, `bcrypt` no alcanza (con
-  4 dígitos se prueba todo en minutos). *Recomiendo* aplicar un HMAC con un secreto del servidor (`PIN_PEPPER`, distinto de `JWT_SECRET`)
-  antes de `bcrypt`, con rehash al iniciar sesión (paso 5, para no bloquear el resto). Costo: gestionar un secreto más; si se pierde,
-  nadie puede entrar.
-- **Recuperación de PIN del OWNER**: no existe en el MVP. Si el dueño olvida su PIN solo se puede resetear a mano (lo que hicimos con el
-  script de desarrollo), con verificación de identidad fuera de la app. Queda para después: OTP por WhatsApp/SMS (costo por mensaje y
-  proveedor), con su propio diseño.
-- **2FA, lista de dispositivos y cierre de sesión por dispositivo**: no entran. La opción B de revocación permite migrar a eso después.
-- **Enumeración de celulares en el registro** (409 "ya está registrado"): se mitiga con el límite por IP, no se elimina; es el
-  compromiso de usabilidad (el tendero necesita saber que ya tiene cuenta).
-- **Rotación de `JWT_SECRET`**: cambiarlo cierra todas las sesiones; no hay rotación gradual (`kid`). Aceptable ahora.
-- **Anulación solo del OWNER**: si el empleado se equivoca debe llamar al dueño; es decisión de producto, y hay que vigilar la fricción.
-- **Índice parcial de OWNER y Prisma**: posible choque con el detector de drift (§2.1); se verifica en el paso 1.
-- **Tokens de la versión actual**: todos los usuarios vuelven a entrar una vez [DECIDIR 11].
-- **Dependencia zod**: este trabajo agrega validadores; es buen momento de migrar zod 3→4 (ver `docs/DEUDA_SEGURIDAD.md`), pero se
-  hace como tarea separada para no mezclar riesgos. **[DECIDIR 12]** *Recomiendo* separarlo.
-- **R1 sigue sin commitear**: este diseño asume el schema de R1 (aplicado en dev). La rama de diseño se creó con el árbol de trabajo
-  de R1 sin commitear; antes de empezar el paso 1 hay que commitear R1 en su propia rama.
+- **Pérdida del pepper (D9):** con pepper nadie puede iniciar sesión si se pierde. Mitigación: gestor de contraseñas + variables del VPS + procedimiento de
+  rotación con versiones (§2.6).
+- **Recuperación de PIN del OWNER:** no existe en el MVP. Si el dueño olvida su PIN solo se puede resetear a mano (lo que hicimos con el script de
+  desarrollo), con verificación de identidad fuera de la app. Después: OTP por WhatsApp/SMS (costo por mensaje y proveedor), con su propio diseño.
+- **2FA, dispositivos de confianza y cierre de sesión por dispositivo:** no entran. La opción B de revocación permite migrar a eso después.
+- **Bloqueo y ataques distribuidos:** el bloqueo por cuenta + IP evita el caso simple (un tercero tecleando mal), pero un ataque sostenido desde muchas IPs
+  aún puede incomodar al dueño hasta 1 h desde una IP nueva. Dispositivos de confianza lo resolverían.
+- **IP del cliente:** `getClientIp()` es seguro solo si Nginx sobrescribe el header y Node no queda expuesto. Va en la lista de verificación del deploy.
+- **Enumeración de celulares en el registro** (409 "ya está registrado"): se mitiga con el límite por IP, no se elimina; es el compromiso de usabilidad.
+- **Rotación de `JWT_SECRET`:** cambiarlo cierra todas las sesiones; no hay rotación gradual (`kid`). Aceptable ahora.
+- **Anulación solo del OWNER:** si el empleado se equivoca debe llamar al dueño; es decisión de producto y hay que vigilar la fricción.
+- **Índice parcial de OWNER y Prisma:** posible choque con el detector de drift (§2.1); se verifica en el paso 1.
+- **Lectura a BD en cada request autenticada:** la latencia en Neon free no está medida; se mide en el paso 2.
+- **Reloj del dispositivo (D10):** no es confiable; se gestiona en la fase offline con "sincronizado tarde" (§6.4).
+- **Pantallas de empleados después del Sprint 1:** hasta el paso 4 solo hay OWNER; las acciones de empleado ya están protegidas por `route()` y se
+  prueban con sesiones sintéticas, pero no hay prueba de punta a punta con un empleado real hasta entonces.
+- **Sesiones actuales (D11, decidido):** todos vuelven a entrar una vez al activar el paso 2.
+- **zod (D12, decidido):** la migración 3→4 es una tarea separada, antes del deploy (ver `docs/DEUDA_SEGURIDAD.md`), para no mezclar riesgos.
 
 ---
 
-## 11. Lista de decisiones pendientes
+## 11. Decisiones (18 entradas: las 16 de la primera versión + D15 y D16 nuevas)
 
-| # | Tema | Recomendación |
-|---|---|---|
-| 1 | Revocación de sesiones | A: `tokenVersion`; logout solo borra la cookie |
-| 2 | Duración del token | 30 días deslizantes, tope 90 desde el último login |
-| 3 | Largo del código de tienda | 6 caracteres, alfabeto sin ambiguos |
-| 4 | Celular de empleados | Único global y opcional (limitación aceptada) |
-| 5 | Permisos con `?` en la matriz | Empleado crea clientes; no edita, no archiva, no inventario, "Hoy" propio sin ganancia, cierre de caja solo OWNER |
-| 6 | PIN de empleado | Temporal generado + cambio obligatorio |
-| 7 | Largo del PIN y umbrales de bloqueo | 4–6 dígitos con lista de triviales; 5 fallos/15 min, bloqueo progresivo hasta 1 h; IP 30/10 min |
-| 8 | Autoría | Renombrar `userId → createdByUserId`; NULL histórico sin inventar autor (`NOT VALID`) |
-| 9 | Pepper del PIN | Sí, en el paso 5 |
-| 10 | Regla de autoría offline | La acepta el mismo usuario o el OWNER; baja ⇒ solo lo anterior a `deactivatedAt` |
-| 11 | Sesiones existentes | Forzar un re-login |
-| 12 | Migración de zod | Tarea separada |
+Estado: ✅ = decidida/aprobada por ti (con las precisiones que pediste). **No queda ninguna decisión pendiente.**
+
+| # | Tema | Estado | Decisión / recomendación |
+|---|---|:-:|---|
+| D1 | Revocación de sesiones | ✅ | Opción A, `tokenVersion`; sube al desactivar, **cambiar o resetear PIN**, reactivar y en **"cerrar todas"** |
+| D1b | Semántica del logout | ✅ | El logout normal solo borra la cookie |
+| D2 | Duración del token | ✅ | 30 días deslizantes, tope 90 desde el último login |
+| D3 | Largo del código de tienda | ✅ | 6 caracteres, alfabeto sin ambiguos |
+| D4 | Celular de empleados | ✅ | Opcional y único global (limitación aceptada) |
+| D5 | Permisos marcados con `?` | ✅ | Empleado crea clientes; no edita ni archiva; no inventario; "Hoy" propio sin ganancia; cierre de caja solo OWNER |
+| D6 | PIN de empleado | ✅ | Temporal generado + cambio obligatorio |
+| D7 | Bloqueo por intentos | ✅ | 4–6 dígitos con lista de triviales; primer bloqueo 5 min, progresivo solo si los ciclos se repiten, máx. 1 h; conteo por cuenta+IP y por cuenta; IP desde `getClientIp()` |
+| D7b | Umbrales numéricos | ✅ | **Aprobada:** 5 fallos/15 min por (cuenta, IP); 25/h por cuenta; 30/10 min por IP; 5 registros/h por IP. Se ajustan con datos reales |
+| D8 | `userId → createdByUserId` | ✅ | `RENAME COLUMN` a mano (+ FK e índices), conteos antes/después en dev, CHECK `NOT VALID` |
+| D9 | Pepper del PIN | ✅ | HMAC-SHA256 + bcrypt, `pinHashVersion`, variable distinta del JWT, en el **paso 3**; sin pepper no arranca en producción |
+| D10 | Autoría offline | ✅ | Principio aceptado, **no se implementa ahora**; riesgo del reloj documentado; "sincronizado tarde" visible al dueño |
+| D11 | Sesiones existentes | ✅ | Forzar un re-login |
+| D12 | Migración de zod | ✅ | Tarea separada |
+| D13 | IP en `AuthEvent` / `RateLimit` | ✅ | **Aprobada:** solo el HMAC de la IP, con clave propia `IP_HASH_KEY` (distinta del pepper y del JWT; placeholder en `.env.example`) |
+| D14 | Retención | ✅ | **Aprobada:** `AuthEvent` 180 días; `RateLimit` se limpia a las 24–48 h |
+| D15 | IP conocida y bloqueo de cuenta | ✅ | **Aprobada con precisión:** el límite por (cuenta, IP) aplica SIEMPRE; la IP conocida solo evita el contador de cuenta que llenan otras IPs y nunca da acceso adicional. Señal débil (IPs móviles compartidas) |
+| D16 | Hashes v1 (sin pepper) | ✅ | **Aprobada:** sin fecha de corte; se actualizan solos en el siguiente login. Se revisa antes del deploy |
+
+D15 y D16 salieron de tus ajustes a D7 y D9; D7b, D13, D14, D15 y D16 se aprobaron en la ronda de cierre.
+
