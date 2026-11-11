@@ -2,6 +2,7 @@
 // Usan el cliente Prisma crudo a propósito: hay que intentar escrituras que
 // storeDb no permitiría y comprobar que la BD las rechaza por sí sola.
 import { prisma } from "@/lib/prisma";
+import { generateStoreCode } from "@/lib/store-code";
 
 export { prisma };
 
@@ -11,7 +12,7 @@ const next = () => `${Date.now().toString(36)}${(counter++).toString(36)}`;
 /** Vacía todas las tablas de negocio (solo existe la BD de pruebas aquí). */
 export async function resetDb() {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "SaleItem","Sale","Payment","StockEntry","SupplierDebt","CashClosing",' +
+    'TRUNCATE TABLE "AuthEvent","RateLimit","SaleItem","Sale","Payment","StockEntry","SupplierDebt","CashClosing",' +
       '"Product","Category","Supplier","Customer","User","Store" RESTART IDENTITY CASCADE'
   );
 }
@@ -29,7 +30,7 @@ export interface Seed {
 /** Crea una tienda completa con una fila de cada entidad referenciable. */
 export async function seedStore(tag: string): Promise<Seed> {
   const n = next();
-  const store = await prisma.store.create({ data: { name: `Tienda ${tag}`, phone: `S${n}` } });
+  const store = await prisma.store.create({ data: { name: `Tienda ${tag}`, phone: `S${n}`, code: generateStoreCode() } });
   const storeId = store.id;
   const [user, customer, category, supplier] = await Promise.all([
     prisma.user.create({
@@ -43,7 +44,7 @@ export async function seedStore(tag: string): Promise<Seed> {
     data: { storeId, name: `Producto ${tag}`, salePrice: "1000", categoryId: category.id },
   });
   const sale = await prisma.sale.create({
-    data: { storeId, paymentType: "CASH", total: "1000", userId: user.id },
+    data: { storeId, paymentType: "CASH", total: "1000", createdByUserId: user.id },
   });
   return {
     storeId,

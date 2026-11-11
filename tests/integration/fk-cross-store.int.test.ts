@@ -29,13 +29,15 @@ const relations: {
   {
     name: "Payment.customer",
     make: (own, ref) =>
-      prisma.payment.create({ data: { storeId: own.storeId, customerId: ref.customerId, amount: "1000" } }),
+      prisma.payment.create({
+        data: { storeId: own.storeId, createdByUserId: own.userId, customerId: ref.customerId, amount: "1000" },
+      }),
   },
   {
-    name: "Payment.user",
+    name: "Payment.createdBy",
     make: (own, ref) =>
       prisma.payment.create({
-        data: { storeId: own.storeId, customerId: own.customerId, userId: ref.userId, amount: "1000" },
+        data: { storeId: own.storeId, customerId: own.customerId, createdByUserId: ref.userId, amount: "1000" },
       }),
   },
   {
@@ -67,17 +69,17 @@ const relations: {
       }),
   },
   {
-    name: "Sale.user",
+    name: "Sale.createdBy",
     make: (own, ref) =>
       prisma.sale.create({
-        data: { storeId: own.storeId, paymentType: "CASH", total: "1000", userId: ref.userId },
+        data: { storeId: own.storeId, paymentType: "CASH", total: "1000", createdByUserId: ref.userId },
       }),
   },
   {
     name: "Sale.customer",
     make: (own, ref) =>
       prisma.sale.create({
-        data: { storeId: own.storeId, paymentType: "CREDIT", total: "1000", customerId: ref.customerId },
+        data: { storeId: own.storeId, createdByUserId: own.userId, paymentType: "CREDIT", total: "1000", customerId: ref.customerId },
       }),
   },
   {
@@ -109,6 +111,49 @@ const relations: {
       }),
   },
   {
+    name: "Payment.voidedBy",
+    make: (own, ref) =>
+      prisma.payment.create({
+        data: {
+          storeId: own.storeId,
+          createdByUserId: own.userId,
+          customerId: own.customerId,
+          amount: "1000",
+          voidedAt: new Date(),
+          voidedByUserId: ref.userId,
+        },
+      }),
+  },
+  {
+    name: "Sale.voidedBy",
+    make: (own, ref) =>
+      prisma.sale.create({
+        data: {
+          storeId: own.storeId,
+          createdByUserId: own.userId,
+          paymentType: "CASH",
+          total: "1000",
+          voidedAt: new Date(),
+          voidedByUserId: ref.userId,
+        },
+      }),
+  },
+  {
+    name: "StockEntry.voidedBy",
+    make: (own, ref) =>
+      prisma.stockEntry.create({
+        data: {
+          storeId: own.storeId,
+          productId: own.productId,
+          quantity: "1",
+          totalCost: "500",
+          unitCost: "500",
+          voidedAt: new Date(),
+          voidedByUserId: ref.userId,
+        },
+      }),
+  },
+  {
     name: "SupplierDebt.supplier",
     make: (own, ref) =>
       prisma.supplierDebt.create({ data: { storeId: own.storeId, supplierId: ref.supplierId, amount: "1000" } }),
@@ -134,19 +179,18 @@ describe("FK compuestas: una fila de la tienda A NO puede apuntar a una entidad 
 });
 
 describe("FK opcionales: NULL se acepta (MATCH SIMPLE no evalúa la FK)", () => {
-  it("Sale sin cliente ni usuario", async () => {
+  it("Sale sin cliente", async () => {
     const sale = await prisma.sale.create({
-      data: { storeId: A.storeId, paymentType: "CASH", total: "1000", customerId: null, userId: null },
+      data: { storeId: A.storeId, createdByUserId: A.userId, paymentType: "CASH", total: "1000", customerId: null },
     });
     expect(sale.customerId).toBeNull();
-    expect(sale.userId).toBeNull();
   });
 
-  it("Payment sin usuario", async () => {
+  it("Payment sin anulación (voidedByUserId null)", async () => {
     const p = await prisma.payment.create({
-      data: { storeId: A.storeId, customerId: A.customerId, userId: null, amount: "1000" },
+      data: { storeId: A.storeId, createdByUserId: A.userId, customerId: A.customerId, voidedByUserId: null, amount: "1000" },
     });
-    expect(p.userId).toBeNull();
+    expect(p.voidedByUserId).toBeNull();
   });
 
   it("Product sin categoría", async () => {
@@ -174,7 +218,7 @@ describe("FK opcionales: NULL se acepta (MATCH SIMPLE no evalúa la FK)", () => 
 describe("UPDATE de storeId: no arrastra ni deja huérfanos los movimientos (ON UPDATE RESTRICT)", () => {
   it("customer con abonos: no se puede mover a otra tienda", async () => {
     await prisma.payment.create({
-      data: { storeId: A.storeId, customerId: A.customerId, amount: "1000" },
+      data: { storeId: A.storeId, createdByUserId: A.userId, customerId: A.customerId, amount: "1000" },
     });
     const err = await rejection(
       prisma.customer.update({ where: { id: A.customerId }, data: { storeId: B.storeId } })
@@ -186,7 +230,7 @@ describe("UPDATE de storeId: no arrastra ni deja huérfanos los movimientos (ON 
 
   it("customer con fiados: no se puede mover", async () => {
     await prisma.sale.create({
-      data: { storeId: A.storeId, paymentType: "CREDIT", total: "1000", customerId: A.customerId },
+      data: { storeId: A.storeId, createdByUserId: A.userId, paymentType: "CREDIT", total: "1000", customerId: A.customerId },
     });
     const err = await rejection(
       prisma.customer.update({ where: { id: A.customerId }, data: { storeId: B.storeId } })
@@ -194,11 +238,40 @@ describe("UPDATE de storeId: no arrastra ni deja huérfanos los movimientos (ON 
     expect(err.message).toMatch(restrict("Sale_customerId_storeId_fkey"));
   });
 
-  it("usuario con ventas: no se puede mover", async () => {
-    const err = await rejection(
-      prisma.user.update({ where: { id: A.userId }, data: { storeId: B.storeId } })
-    );
-    expect(err.message).toMatch(restrict("Sale_userId_storeId_fkey"));
+  it("empleado con ventas registradas: no se puede mover a otra tienda (FK de autoría)", async () => {
+    const emp = await prisma.user.create({
+      data: { storeId: A.storeId, name: "Emp", role: "EMPLOYEE", username: "caja", pinHash: "x" },
+    });
+    await prisma.sale.create({
+      data: { storeId: A.storeId, createdByUserId: emp.id, paymentType: "CASH", total: "1000" },
+    });
+    const err = await rejection(prisma.user.update({ where: { id: emp.id }, data: { storeId: B.storeId } }));
+    expect(err.message).toMatch(restrict("Sale_createdByUserId_storeId_fkey"));
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: emp.id } })).storeId).toBe(A.storeId);
+  });
+
+  it("empleado que anuló un abono: no se puede mover a otra tienda (FK de anulación)", async () => {
+    const emp = await prisma.user.create({
+      data: { storeId: A.storeId, name: "Emp", role: "EMPLOYEE", username: "anula", pinHash: "x" },
+    });
+    await prisma.payment.create({
+      data: {
+        storeId: A.storeId,
+        createdByUserId: A.userId,
+        customerId: A.customerId,
+        amount: "1000",
+        voidedAt: new Date(),
+        voidedByUserId: emp.id,
+      },
+    });
+    const err = await rejection(prisma.user.update({ where: { id: emp.id }, data: { storeId: B.storeId } }));
+    expect(err.message).toMatch(restrict("Payment_voidedByUserId_storeId_fkey"));
+  });
+
+  it("el OWNER de una tienda no se puede mover a otra que ya tiene OWNER (índice de un solo OWNER)", async () => {
+    const err = await rejection(prisma.user.update({ where: { id: A.userId }, data: { storeId: B.storeId } }));
+    expect(err.code).toBe("P2002");
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: A.userId } })).storeId).toBe(A.storeId);
   });
 
   it("producto con ítems de venta: no se puede mover", async () => {
@@ -223,7 +296,7 @@ describe("UPDATE de storeId: no arrastra ni deja huérfanos los movimientos (ON 
 
   it("no se puede reescribir el storeId de un abono para colgarlo del cliente de B", async () => {
     const pay = await prisma.payment.create({
-      data: { storeId: A.storeId, customerId: A.customerId, amount: "1000" },
+      data: { storeId: A.storeId, createdByUserId: A.userId, customerId: A.customerId, amount: "1000" },
     });
     const err = await rejection(
       prisma.payment.update({ where: { id: pay.id }, data: { storeId: B.storeId } })
@@ -234,7 +307,7 @@ describe("UPDATE de storeId: no arrastra ni deja huérfanos los movimientos (ON 
 
 describe("ON DELETE RESTRICT: nada con movimientos se borra", () => {
   it("customer con abonos no se puede borrar", async () => {
-    await prisma.payment.create({ data: { storeId: A.storeId, customerId: A.customerId, amount: "1000" } });
+    await prisma.payment.create({ data: { storeId: A.storeId, createdByUserId: A.userId, customerId: A.customerId, amount: "1000" } });
     const err = await rejection(prisma.customer.delete({ where: { id: A.customerId } }));
     expect(err.message).toMatch(restrict("Payment_customerId_storeId_fkey"));
   });

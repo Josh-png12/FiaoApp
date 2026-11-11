@@ -19,7 +19,7 @@ const creators: { name: string; make: (s: Seed, clientId: string) => PromiseLike
   {
     name: "Payment",
     make: (s, clientId) =>
-      prisma.payment.create({ data: { storeId: s.storeId, customerId: s.customerId, amount: "1000", clientId } }),
+      prisma.payment.create({ data: { storeId: s.storeId, createdByUserId: s.userId, customerId: s.customerId, amount: "1000", clientId } }),
   },
   {
     name: "Product",
@@ -36,7 +36,7 @@ const creators: { name: string; make: (s: Seed, clientId: string) => PromiseLike
   {
     name: "Sale",
     make: (s, clientId) =>
-      prisma.sale.create({ data: { storeId: s.storeId, paymentType: "CASH", total: "1000", clientId } }),
+      prisma.sale.create({ data: { storeId: s.storeId, createdByUserId: s.userId, paymentType: "CASH", total: "1000", clientId } }),
   },
   {
     name: "CashClosing",

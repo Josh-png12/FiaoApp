@@ -2,7 +2,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { generateStoreCode } from "@/lib/store-code";
 import {
   signSession,
   setSessionCookie,
@@ -48,22 +50,36 @@ export async function POST(req: NextRequest) {
 
   const pinHash = await bcrypt.hash(parsed.data.pin, 10);
 
-  const store = await prisma.store.create({
-    data: {
-      name: parsed.data.storeName.trim(),
-      ownerName: parsed.data.ownerName.trim(),
-      phone,
-      users: {
-        create: {
-          name: parsed.data.ownerName.trim(),
+  // Store.code es obligatorio y único (R2): se genera aquí y se reintenta si choca con otro.
+  // (La carrera de registro por celular repetido, P2002 en phone, se resuelve en el paso 3.)
+  const ownerData = {
+    name: parsed.data.ownerName.trim(),
+    phone,
+    pinHash,
+    role: "OWNER" as const,
+  };
+  let store;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      store = await prisma.store.create({
+        data: {
+          code: generateStoreCode(),
+          name: parsed.data.storeName.trim(),
+          ownerName: parsed.data.ownerName.trim(),
           phone,
-          pinHash,
-          role: "OWNER",
+          users: { create: ownerData },
         },
-      },
-    },
-    include: { users: true },
-  });
+        include: { users: true },
+      });
+      break;
+    } catch (e) {
+      const codeCollision =
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === "P2002" &&
+        String(e.meta?.target ?? "").includes("code");
+      if (!codeCollision || attempt >= 5) throw e;
+    }
+  }
 
   const user = store.users[0];
   const token = await signSession({

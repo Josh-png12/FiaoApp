@@ -15,21 +15,21 @@ beforeEach(async () => {
 describe("CHECK: un fiado (CREDIT) siempre tiene cliente", () => {
   it("rechaza CREDIT sin customerId", async () => {
     const err = await rejection(
-      prisma.sale.create({ data: { storeId: A.storeId, paymentType: "CREDIT", total: "5000" } })
+      prisma.sale.create({ data: { storeId: A.storeId, createdByUserId: A.userId, paymentType: "CREDIT", total: "5000" } })
     );
     expect(err.message).toMatch(CHECK);
   });
 
   it("acepta CREDIT con cliente (control)", async () => {
     const sale = await prisma.sale.create({
-      data: { storeId: A.storeId, paymentType: "CREDIT", total: "5000", customerId: A.customerId },
+      data: { storeId: A.storeId, createdByUserId: A.userId, paymentType: "CREDIT", total: "5000", customerId: A.customerId },
     });
     expect(sale.customerId).toBe(A.customerId);
   });
 
   it("acepta una venta de contado sin cliente (control)", async () => {
     for (const paymentType of ["CASH", "NEQUI", "DAVIPLATA"] as const) {
-      await prisma.sale.create({ data: { storeId: A.storeId, paymentType, total: "5000" } });
+      await prisma.sale.create({ data: { storeId: A.storeId, createdByUserId: A.userId, paymentType, total: "5000" } });
     }
   });
 });
@@ -37,27 +37,27 @@ describe("CHECK: un fiado (CREDIT) siempre tiene cliente", () => {
 describe("CHECK: Sale.total > 0", () => {
   it.each(["0", "-1", "-5000"])("rechaza total = %s", async (total) => {
     const err = await rejection(
-      prisma.sale.create({ data: { storeId: A.storeId, paymentType: "CASH", total } })
+      prisma.sale.create({ data: { storeId: A.storeId, createdByUserId: A.userId, paymentType: "CASH", total } })
     );
     expect(err.message).toMatch(CHECK);
   });
 
   it("acepta total = 1 (control)", async () => {
-    await prisma.sale.create({ data: { storeId: A.storeId, paymentType: "CASH", total: "1" } });
+    await prisma.sale.create({ data: { storeId: A.storeId, createdByUserId: A.userId, paymentType: "CASH", total: "1" } });
   });
 });
 
 describe("CHECK: Payment.amount > 0", () => {
   it.each(["0", "-1", "-5000"])("rechaza amount = %s", async (amount) => {
     const err = await rejection(
-      prisma.payment.create({ data: { storeId: A.storeId, customerId: A.customerId, amount } })
+      prisma.payment.create({ data: { storeId: A.storeId, createdByUserId: A.userId, customerId: A.customerId, amount } })
     );
     expect(err.message).toMatch(CHECK);
   });
 
   it("acepta amount = 1 (control)", async () => {
     await prisma.payment.create({
-      data: { storeId: A.storeId, customerId: A.customerId, amount: "1" },
+      data: { storeId: A.storeId, createdByUserId: A.userId, customerId: A.customerId, amount: "1" },
     });
   });
 });

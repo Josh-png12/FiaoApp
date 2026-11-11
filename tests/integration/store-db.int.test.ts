@@ -14,10 +14,10 @@ beforeEach(async () => {
   // Movimientos de ambas tiendas para poder comparar agregados
   for (const s of [A, B]) {
     await prisma.sale.create({
-      data: { storeId: s.storeId, paymentType: "CREDIT", total: s === A ? "2000" : "7000", customerId: s.customerId },
+      data: { storeId: s.storeId, createdByUserId: s.userId, paymentType: "CREDIT", total: s === A ? "2000" : "7000", customerId: s.customerId },
     });
     await prisma.payment.create({
-      data: { storeId: s.storeId, customerId: s.customerId, amount: s === A ? "500" : "900" },
+      data: { storeId: s.storeId, createdByUserId: s.userId, customerId: s.customerId, amount: s === A ? "500" : "900" },
     });
     await prisma.saleItem.create({
       data: { storeId: s.storeId, saleId: s.saleId, productId: s.productId, quantity: "1", unitPrice: "1000" },
@@ -107,16 +107,16 @@ describe("update / void con un id de otra tienda afectan 0 filas", () => {
   it("sale.void y payment.void", async () => {
     const payB = await prisma.payment.findFirstOrThrow({ where: { storeId: B.storeId } });
     const db = storeDb(A.storeId);
-    expect((await db.sale.void(B.saleId)).count).toBe(0);
-    expect((await db.payment.void(payB.id)).count).toBe(0);
+    expect((await db.sale.void(B.saleId, A.userId)).count).toBe(0);
+    expect((await db.payment.void(payB.id, A.userId)).count).toBe(0);
     expect((await prisma.sale.findUniqueOrThrow({ where: { id: B.saleId } })).voidedAt).toBeNull();
     expect((await prisma.payment.findUniqueOrThrow({ where: { id: payB.id } })).voidedAt).toBeNull();
   });
 
   it("sale.void propio anula una sola vez (append-only: no se borra)", async () => {
     const db = storeDb(A.storeId);
-    expect((await db.sale.void(A.saleId)).count).toBe(1);
-    expect((await db.sale.void(A.saleId)).count).toBe(0);
+    expect((await db.sale.void(A.saleId, A.userId)).count).toBe(1);
+    expect((await db.sale.void(A.saleId, A.userId)).count).toBe(0);
     const sale = await prisma.sale.findUniqueOrThrow({ where: { id: A.saleId } });
     expect(sale.voidedAt).not.toBeNull();
   });
@@ -162,8 +162,8 @@ describe("create: el storeId lo pone storeDb y no se aceptan relaciones del clie
       }
       throw new Error("Se esperaba un rechazo");
     };
-    const e1 = await grab(db.payment.create({ customerId: B.customerId, amount: "1000" }));
-    const e2 = await grab(db.payment.create({ customerId: "no-existe", amount: "1000" }));
+    const e1 = await grab(db.payment.create({ createdByUserId: A.userId, customerId: B.customerId, amount: "1000" }));
+    const e2 = await grab(db.payment.create({ createdByUserId: A.userId, customerId: "no-existe", amount: "1000" }));
     expect(e1).toBeInstanceOf(RelatedEntityError);
     expect(e2).toBeInstanceOf(RelatedEntityError);
     if (!(e1 instanceof RelatedEntityError) || !(e2 instanceof RelatedEntityError)) return;
@@ -187,7 +187,7 @@ describe("create: el storeId lo pone storeDb y no se aceptan relaciones del clie
   it("no queda nada escrito tras un create rechazado", async () => {
     const before = await prisma.payment.count();
     await storeDb(A.storeId)
-      .payment.create({ customerId: B.customerId, amount: "1000" })
+      .payment.create({ createdByUserId: A.userId, customerId: B.customerId, amount: "1000" })
       .catch(() => undefined);
     expect(await prisma.payment.count()).toBe(before);
   });

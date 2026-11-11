@@ -117,9 +117,14 @@ export function storeDb(storeId: string) {
         assertScalarData(data);
         return translateFkError(() => prisma.sale.create({ data: { ...data, storeId } }));
       },
-      /** Anular (append-only): nunca borrar ni editar montos. */
-      void: (id: string) =>
-        prisma.sale.updateMany({ where: { id, storeId, voidedAt: null }, data: { voidedAt: new Date() } }),
+      /** Anular (append-only): nunca borrar ni editar montos. Registra quién anula (R2: voidedByUserId). */
+      void: (id: string, voidedByUserId: string) =>
+        translateFkError(() =>
+          prisma.sale.updateMany({
+            where: { id, storeId, voidedAt: null },
+            data: { voidedAt: new Date(), voidedByUserId },
+          })
+        ),
     },
 
     payment: {
@@ -135,8 +140,13 @@ export function storeDb(storeId: string) {
         assertScalarData(data);
         return translateFkError(() => prisma.payment.create({ data: { ...data, storeId } }));
       },
-      void: (id: string) =>
-        prisma.payment.updateMany({ where: { id, storeId, voidedAt: null }, data: { voidedAt: new Date() } }),
+      void: (id: string, voidedByUserId: string) =>
+        translateFkError(() =>
+          prisma.payment.updateMany({
+            where: { id, storeId, voidedAt: null },
+            data: { voidedAt: new Date(), voidedByUserId },
+          })
+        ),
     },
 
     category: {
@@ -186,8 +196,13 @@ export function storeDb(storeId: string) {
         assertScalarData(data);
         return translateFkError(() => prisma.stockEntry.create({ data: { ...data, storeId } }));
       },
-      void: (id: string) =>
-        prisma.stockEntry.updateMany({ where: { id, storeId, voidedAt: null }, data: { voidedAt: new Date() } }),
+      void: (id: string, voidedByUserId: string) =>
+        translateFkError(() =>
+          prisma.stockEntry.updateMany({
+            where: { id, storeId, voidedAt: null },
+            data: { voidedAt: new Date(), voidedByUserId },
+          })
+        ),
     },
 
     saleItem: {
