@@ -4,8 +4,12 @@
 // Dinero: Decimal(12,2) en COP. Nunca Float.
 // Movimientos (ventas, fiados, abonos) son APPEND-ONLY:
 //   no se editan ni borran; se anulan con voidedAt + movimiento inverso.
-// Sync offline: clientId (UUID generado en el dispositivo) es UNIQUE
-//   → el endpoint /api/sync hace upsert por clientId (idempotente).
+// Sync offline: clientId (UUID generado en el dispositivo) es UNIQUE POR TIENDA
+//   (storeId, clientId) → el endpoint /api/sync hace upsert por ese par (idempotente).
+// Aislamiento multi-tienda a nivel de BD: los modelos referenciados tienen
+//   @@unique([id, storeId]) y las relaciones son FK compuestas (xId, storeId),
+//   de modo que Postgres impide relacionar filas de tiendas distintas.
+//   Nunca se borra: todas las FK son onDelete: Restrict.
 // =====================================================================
 
 generator client {
@@ -43,6 +47,7 @@ model Store {
   cashClosings  CashClosing[]
   suppliers     Supplier[]
   supplierDebts SupplierDebt[]
+  saleItems     SaleItem[]
 }
 
 enum Plan {
@@ -52,26 +57,27 @@ enum Plan {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  storeId      String
-  store        Store    @relation(fields: [storeId], references: [id])
-  name         String
-  phone        String   @unique // login: teléfono + PIN
-  pinHash      String   // bcrypt del PIN de 4-6 dígitos
-  role         Role     @default(OWNER)
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id        String   @id @default(cuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id])
+  name      String
+  phone     String   @unique // login: teléfono + PIN
+  pinHash   String // bcrypt del PIN de 4-6 dígitos
+  role      Role     @default(OWNER)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   sales        Sale[]
   payments     Payment[]
   cashClosings CashClosing[]
 
+  @@unique([id, storeId])
   @@index([storeId])
 }
 
 enum Role {
-  OWNER    // ve todo, edita precios, ve ganancias
+  OWNER // ve todo, edita precios, ve ganancias
   EMPLOYEE // solo registra ventas/fiados/abonos
 }
 
@@ -80,26 +86,28 @@ enum Role {
 // ---------------------------------------------------------------------
 
 model Customer {
-  id          String    @id @default(cuid())
-  clientId    String?   @unique // UUID del dispositivo (sync)
+  id          String   @id @default(cuid())
+  clientId    String? // UUID del dispositivo (sync); único por tienda
   storeId     String
-  store       Store     @relation(fields: [storeId], references: [id])
+  store       Store    @relation(fields: [storeId], references: [id])
   name        String
-  phone       String?   // para recordatorio por WhatsApp
+  phone       String? // para recordatorio por WhatsApp
   photoUrl    String?
   note        String?
-  creditLimit Decimal?  @db.Decimal(12, 2) // límite sugerido (Fase 3)
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  creditLimit Decimal? @db.Decimal(12, 2) // límite sugerido (Fase 3)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  sales    Sale[]    // ventas fiadas asociadas
+  sales    Sale[] // ventas fiadas asociadas
   payments Payment[] // abonos
 
   // saldo = SUM(ventas CREDIT no anuladas) - SUM(abonos no anulados)
   // Derivado, nunca fuente de verdad. Se puede cachear con un campo
   // balanceCache si el rendimiento lo pide, recalculable siempre.
 
+  @@unique([id, storeId])
+  @@unique([storeId, clientId])
   @@index([storeId, isActive])
   @@index([storeId, name])
 }
@@ -108,20 +116,21 @@ model Customer {
 // igual que en el cuaderno real).
 model Payment {
   id         String    @id @default(cuid())
-  clientId   String?   @unique // UUID del dispositivo (sync)
+  clientId   String? // UUID del dispositivo (sync); único por tienda
   storeId    String
   store      Store     @relation(fields: [storeId], references: [id])
   customerId String
-  customer   Customer  @relation(fields: [customerId], references: [id])
+  customer   Customer  @relation(fields: [customerId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
   userId     String?
-  user       User?     @relation(fields: [userId], references: [id])
-  amount     Decimal   @db.Decimal(12, 2)
+  user       User?     @relation(fields: [userId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
+  amount     Decimal   @db.Decimal(12, 2) // CHECK amount > 0 (migración r1)
   method     PayMethod @default(CASH)
   note       String?
   paidAt     DateTime  @default(now()) // fecha real (puede venir del cliente offline)
   voidedAt   DateTime? // anulación append-only
   createdAt  DateTime  @default(now())
 
+  @@unique([storeId, clientId])
   @@index([storeId, customerId])
   @@index([storeId, paidAt])
 }
@@ -139,23 +148,24 @@ enum PayMethod {
 // ---------------------------------------------------------------------
 
 model Category {
-  id              String    @id @default(cuid())
-  storeId         String
-  store           Store     @relation(fields: [storeId], references: [id])
-  name            String    // "Abarrotes", "Bebidas", "Aseo"...
-  defaultMarginPct Decimal? @db.Decimal(5, 2) // fallback cuando no se conoce el costo
-  products        Product[]
+  id               String    @id @default(cuid())
+  storeId          String
+  store            Store     @relation(fields: [storeId], references: [id])
+  name             String // "Abarrotes", "Bebidas", "Aseo"...
+  defaultMarginPct Decimal?  @db.Decimal(5, 2) // fallback cuando no se conoce el costo
+  products         Product[]
 
+  @@unique([id, storeId])
   @@unique([storeId, name])
 }
 
 model Product {
   id         String    @id @default(cuid())
-  clientId   String?   @unique
+  clientId   String? // único por tienda
   storeId    String
   store      Store     @relation(fields: [storeId], references: [id])
   categoryId String?
-  category   Category? @relation(fields: [categoryId], references: [id])
+  category   Category? @relation(fields: [categoryId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
   name       String
   photoUrl   String?
   salePrice  Decimal   @db.Decimal(12, 2)
@@ -169,6 +179,8 @@ model Product {
   saleItems    SaleItem[]
   stockEntries StockEntry[]
 
+  @@unique([id, storeId])
+  @@unique([storeId, clientId])
   @@index([storeId, isActive])
   @@index([storeId, name])
 }
@@ -176,13 +188,13 @@ model Product {
 // Entrada de mercancía por lote: costo total + cantidad → costo unitario.
 model StockEntry {
   id         String    @id @default(cuid())
-  clientId   String?   @unique
+  clientId   String? // único por tienda
   storeId    String
   store      Store     @relation(fields: [storeId], references: [id])
   productId  String
-  product    Product   @relation(fields: [productId], references: [id])
+  product    Product   @relation(fields: [productId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
   supplierId String?
-  supplier   Supplier? @relation(fields: [supplierId], references: [id])
+  supplier   Supplier? @relation(fields: [supplierId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
   quantity   Decimal   @db.Decimal(12, 3)
   totalCost  Decimal   @db.Decimal(12, 2)
   unitCost   Decimal   @db.Decimal(12, 4) // totalCost / quantity, calculado al crear
@@ -190,6 +202,7 @@ model StockEntry {
   voidedAt   DateTime?
   createdAt  DateTime  @default(now())
 
+  @@unique([storeId, clientId])
   @@index([storeId, productId])
 }
 
@@ -199,17 +212,17 @@ model StockEntry {
 
 model Sale {
   id          String      @id @default(cuid())
-  clientId    String?     @unique // UUID del dispositivo (sync idempotente)
+  clientId    String? // UUID del dispositivo (sync idempotente); único por tienda
   storeId     String
   store       Store       @relation(fields: [storeId], references: [id])
   userId      String?
-  user        User?       @relation(fields: [userId], references: [id])
-  customerId  String?     // obligatorio si paymentType = CREDIT
-  customer    Customer?   @relation(fields: [customerId], references: [id])
+  user        User?       @relation(fields: [userId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
+  customerId  String? // obligatorio si paymentType = CREDIT (CHECK en migración r1)
+  customer    Customer?   @relation(fields: [customerId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
   paymentType PaymentType
   // total y costo se guardan desnormalizados para reportes rápidos,
   // pero siempre reconstruibles desde items (o venta libre sin items).
-  total       Decimal     @db.Decimal(12, 2)
+  total       Decimal     @db.Decimal(12, 2) // CHECK total > 0 (migración r1)
   totalCost   Decimal?    @db.Decimal(12, 2) // null en venta libre sin producto (MVP)
   note        String?
   soldAt      DateTime    @default(now()) // timestamp real, puede venir de offline
@@ -218,28 +231,33 @@ model Sale {
 
   items SaleItem[]
 
+  @@unique([id, storeId])
+  @@unique([storeId, clientId])
   @@index([storeId, soldAt])
   @@index([storeId, customerId])
   @@index([storeId, paymentType, soldAt])
 }
 
 enum PaymentType {
-  CASH   // efectivo
+  CASH // efectivo
   CREDIT // fiado
   NEQUI
   DAVIPLATA
 }
 
 model SaleItem {
-  id        String  @id @default(cuid())
+  id        String   @id @default(cuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id])
   saleId    String
-  sale      Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  sale      Sale     @relation(fields: [saleId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
   productId String
-  product   Product @relation(fields: [productId], references: [id])
-  quantity  Decimal @db.Decimal(12, 3)
-  unitPrice Decimal @db.Decimal(12, 2) // precio CONGELADO al vender
+  product   Product  @relation(fields: [productId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
+  quantity  Decimal  @db.Decimal(12, 3) // CHECK quantity > 0 (migración r1)
+  unitPrice Decimal  @db.Decimal(12, 2) // precio CONGELADO al vender
   unitCost  Decimal? @db.Decimal(12, 4) // costo CONGELADO al vender (clave para ganancia histórica)
 
+  @@index([storeId, saleId])
   @@index([productId])
 }
 
@@ -249,11 +267,11 @@ model SaleItem {
 
 model CashClosing {
   id           String   @id @default(cuid())
-  clientId     String?  @unique
+  clientId     String? // único por tienda
   storeId      String
   store        Store    @relation(fields: [storeId], references: [id])
   userId       String?
-  user         User?    @relation(fields: [userId], references: [id])
+  user         User?    @relation(fields: [userId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
   date         DateTime @db.Date
   expectedCash Decimal  @db.Decimal(12, 2) // calculado: ventas CASH + abonos CASH del día
   countedCash  Decimal  @db.Decimal(12, 2) // lo que el tendero contó
@@ -261,6 +279,7 @@ model CashClosing {
   note         String?
   createdAt    DateTime @default(now())
 
+  @@unique([storeId, clientId])
   @@unique([storeId, date, userId]) // un cierre por usuario por día
   @@index([storeId, date])
 }
@@ -281,6 +300,7 @@ model Supplier {
   stockEntries StockEntry[]
   debts        SupplierDebt[]
 
+  @@unique([id, storeId])
   @@index([storeId])
 }
 
@@ -289,7 +309,7 @@ model SupplierDebt {
   storeId    String
   store      Store     @relation(fields: [storeId], references: [id])
   supplierId String
-  supplier   Supplier  @relation(fields: [supplierId], references: [id])
+  supplier   Supplier  @relation(fields: [supplierId, storeId], references: [id, storeId], onDelete: Restrict, onUpdate: Restrict)
   amount     Decimal   @db.Decimal(12, 2)
   dueDate    DateTime? @db.Date
   paidAt     DateTime?
