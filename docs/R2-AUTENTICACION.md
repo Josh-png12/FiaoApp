@@ -488,6 +488,23 @@ El **paso 4 (pantallas y flujos de empleados) va DESPUÉS del Sprint 1.** El **p
 
 Cada paso cierra con `typecheck`, `lint`, `test`, `test:integration` y `build` verdes, y se entrega con su reporte antes de empezar el siguiente.
 
+### Estado del paso 1 (implementado)
+
+Migración `20261111120000_r2_auth_schema_autoria` (con `down.sql`), probada up → down → up en la BD de pruebas y aplicada a dev.
+Lo implementado coincide con §2 y §7, con estas **desviaciones y decisiones tomadas al implementar**:
+
+1. **`void_pair` también va `NOT VALID`** (§7 solo lo decía de la autoría). Con el CHECK validado, una anulación histórica sin
+   "quién anuló" lo violaría. Igual que la autoría: exige el par a filas nuevas o modificadas; el histórico no se revalida.
+2. **Límite conocido de `NOT VALID`:** Postgres también evalúa el CHECK al **modificar** una fila histórica. Si existiera una venta
+   anterior a R2 sin autor, anularla (UPDATE) fallaría por `created_by_required_chk`. Hoy no hay ninguna (dev tiene 0 ventas y 0 abonos).
+   Si aparece el caso, la alternativa es una condición por fecha de corte (`"createdByUserId" IS NOT NULL OR "createdAt" < <corte>`).
+3. **CHECK adicionales:** formato de `username` (`^[a-z0-9._]{3,20}$`), `Store.code` (`^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{6}$`),
+   `tokenVersion >= 0` y `pinHashVersion >= 1`.
+4. **Código existente que hubo que tocar:** `Store.code` es obligatorio, así que `register` genera el código (`lib/store-code.ts`) y reintenta
+   si choca; y `storeDb.<sale|payment|stockEntry>.void(id, voidedByUserId)` ahora recibe quién anula (si no, violaría el CHECK de pareja).
+   La carrera de registro por celular repetido (409) sigue pendiente para el paso 3.
+5. **`down.sql` se niega** si existen usuarios sin celular (empleados); no cambia nada y avisa.
+
 ---
 
 ## 10. Riesgos y deuda (qué queda fuera y por qué)
