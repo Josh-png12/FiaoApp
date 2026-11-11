@@ -15,18 +15,29 @@ npm run dev
 
 ```bash
 npm run dev          # desarrollo
+npm run typecheck    # tsc --noEmit
+npm run lint         # ESLint (flat config)
 npm run test         # tests unitarios (vitest)
 npm run build        # prisma generate + next build
 npx prisma studio    # explorar la DB
 ```
 
-## Estado (Sprint 1)
+## Estado
+
+Implementado:
 
 - [x] Scaffold Next.js 15 + TS + Tailwind 4 + Prisma
-- [x] Schema completo (multi-tenant por storeId, append-only, Decimal)
+- [x] Schema multi-tenant por `storeId`, con `Decimal` para dinero y anulación por `voidedAt`
 - [x] Auth teléfono + PIN (JWT httpOnly, middleware)
-- [x] Helpers core con tests: `lib/money.ts`, `lib/dates.ts`, `lib/db.ts`
-- [x] UI: login, registro, pantalla Hoy (con saldos derivados reales)
-- [ ] Deploy al VPS (PM2 + Nginx) — pendiente
+- [x] Helpers con tests unitarios: `lib/money.ts`, `lib/dates.ts`, `lib/db.ts` (`storeDb` cubre solo cliente, venta y abono)
+- [x] UI: login, registro y pantalla Hoy (saldos derivados)
+
+Aún NO existe:
+
+- [ ] Fiados (`/fiados`) y Ventas (`/ventas`): son solo páginas placeholder
+- [ ] Offline / PWA / sincronización (no hay service worker, Dexie ni `/api/sync`)
+- [ ] Productos, inventario, estadísticas y cierre de caja (solo modelados en el schema)
+- [ ] Pruebas de integración con base de datos
+- [ ] Deploy al VPS (PM2 + Nginx)
 
 Ver `CLAUDE.md` para reglas de dominio y `docs/04-ROADMAP.md` para el plan.
